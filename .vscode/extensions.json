@@ -1,0 +1,11 @@
+{
+  "recommendations": [
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode",
+    "bradlc.vscode-tailwindcss",
+    "ms-vscode.vscode-typescript-next",
+    "svelte.svelte-vscode",
+    "PKief.material-icon-theme",
+    "streetsidesoftware.code-spell-checker"
+  ]
+}
