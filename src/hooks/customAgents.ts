@@ -219,7 +219,7 @@ export const useMultiAgentCoordinator = () => {
    */
   const completeWorkflow = async (
     initialCode: string,
-    requirements: string
+    _requirements: string
   ) => {
     const workflow = {
       steps: [] as any[],

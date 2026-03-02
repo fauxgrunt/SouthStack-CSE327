@@ -1,8 +1,12 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import * as webllm from '@mlc-ai/web-llm';
+import { limitArraySize } from '../utils/performance';
 
 // Model Configuration
 export type ModelType = '0.5B' | '1.5B';
+
+// Maximum number of logs to keep in memory (prevent memory leaks)
+const MAX_LOG_ENTRIES = 500;
 
 export const MODEL_CONFIGS = {
   '0.5B': {
@@ -82,12 +86,16 @@ export const useAgenticLoop = () => {
   const webContainerRef = useRef<WebContainerMock | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
-  // Logging utility
+  // Logging utility with automatic size limiting for memory management
   const addLog = useCallback((phase: string, message: string, type: LogEntry['type'] = 'info') => {
-    setState(prev => ({
-      ...prev,
-      logs: [...prev.logs, { timestamp: new Date(), phase, message, type }],
-    }));
+    setState(prev => {
+      const newLogs = [...prev.logs, { timestamp: new Date(), phase, message, type }];
+      // Automatically limit log array size to prevent memory issues
+      return {
+        ...prev,
+        logs: limitArraySize(newLogs, MAX_LOG_ENTRIES),
+      };
+    });
   }, []);
 
   /**
@@ -145,7 +153,8 @@ export const useAgenticLoop = () => {
       }
 
       // Check WebGPU availability
-      if (!navigator.gpu) {
+      const navigatorWithGPU = navigator as typeof navigator & { gpu?: { requestAdapter: () => Promise<unknown> } };
+      if (!navigatorWithGPU.gpu) {
         throw new Error('WebGPU not supported in this browser. Please use Chrome/Edge 113+');
       }
 

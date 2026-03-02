@@ -76,11 +76,6 @@ const App: React.FC = () => {
     }
   }, [generatedCode]);
 
-  // Helper: Check if phase is loading
-  const isPhaseLoading = () => {
-    return ['initializing', 'generating', 'installing', 'executing'].includes(phase);
-  };
-
   // Helper: Detect language from code
   const detectLanguage = (code: string): string => {
     if (code.includes('import') || code.includes('export') || code.includes('const') || code.includes('let')) {
@@ -109,7 +104,8 @@ const App: React.FC = () => {
 
     try {
       // Step 1: Check WebGPU
-      if (!navigator.gpu) {
+      const navigatorWithGPU = navigator as typeof navigator & { gpu?: { requestAdapter: () => Promise<unknown> } };
+      if (!navigatorWithGPU.gpu) {
         throw new Error('WebGPU not supported. Please use Chrome/Edge 113+');
       }
       addLog('[OK] WebGPU available', 'success');

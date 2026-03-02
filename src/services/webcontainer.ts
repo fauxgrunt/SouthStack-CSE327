@@ -14,7 +14,6 @@ class WebContainerService {
   private static instance: WebContainerService | null = null;
   private container: WebContainer | null = null;
   private bootPromise: Promise<WebContainer> | null = null;
-  private isBooting = false;
 
   private constructor() {
     // Private constructor for singleton pattern
@@ -46,7 +45,6 @@ class WebContainerService {
     }
 
     // Start booting
-    this.isBooting = true;
     this.bootPromise = this._bootContainer();
 
     try {
@@ -55,10 +53,7 @@ class WebContainerService {
     } catch (error) {
       // Reset state on failure
       this.bootPromise = null;
-      this.isBooting = false;
       throw error;
-    } finally {
-      this.isBooting = false;
     }
   }
 
@@ -234,7 +229,7 @@ class WebContainerService {
    * WebContainer automatically maps ports to unique URLs
    */
   public async getServerUrl(port: number = 3000): Promise<string> {
-    const container = this.getContainer();
+    this.getContainer();
     
     // Wait for server to be ready (simple polling)
     await new Promise(resolve => setTimeout(resolve, 1000));

@@ -1,9 +1,23 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo, lazy, Suspense } from "react";
 import { useAgenticLoop } from "../hooks/useAgenticLoop";
 import { MODEL_CONFIGS, ModelType } from "../hooks/useAgenticLoop";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { WindowControls } from "./WindowControls";
+import { LightweightCodeViewer } from "./LightweightCodeViewer";
+import { VirtualizedLogViewer } from "./VirtualizedLogViewer";
+import {
+  detectDeviceCapability,
+  getPerformanceConfig,
+  throttle,
+  limitArraySize,
+  type PerformanceConfig
+} from "../utils/performance";
+
+// Lazy load heavy syntax highlighter
+const SyntaxHighlighter = lazy(() =>
+  import("react-syntax-highlighter").then((module) => ({
+    default: module.Prism,
+  }))
+);
 
 /**
  * AgenticIDE - Professional IDE interface showcasing the autonomous coding workflow
@@ -19,13 +33,50 @@ export const AgenticIDE: React.FC = () => {
   } = useAgenticLoop();
   const [userPrompt, setUserPrompt] = useState("");
   const [codeCopied, setCodeCopied] = useState(false);
+  const [perfConfig, setPerfConfig] = useState<PerformanceConfig | null>(null);
+  const [highlighterStyle, setHighlighterStyle] = useState<any>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Auto-scroll logs
+  // Detect device capability and configure performance settings
   useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [state.logs]);
+    detectDeviceCapability().then((capability) => {
+      const config = getPerformanceConfig(capability);
+      setPerfConfig(config);
+
+      // Lazy load syntax highlighter style only if needed
+      if (config.syntaxHighlightingEnabled) {
+        import("react-syntax-highlighter/dist/esm/styles/prism").then((module) => {
+          setHighlighterStyle(module.vscDarkPlus);
+        });
+      }
+    });
+  }, []);
+
+  // Limit logs for memory management
+  const optimizedLogs = useMemo(() => {
+    if (!perfConfig) return state.logs;
+    return limitArraySize(state.logs, perfConfig.maxLogs);
+  }, [state.logs, perfConfig]);
+
+  // Auto-scroll logs with throttling for performance
+  const throttledScrollToBottom = useMemo(
+    () =>
+      throttle(() => {
+        if (logsEndRef.current && perfConfig) {
+          logsEndRef.current.scrollIntoView({
+            behavior: perfConfig.scrollBehavior,
+          });
+        }
+      }, perfConfig?.autoScrollThrottle || 100),
+    [perfConfig]
+  );
+
+  useEffect(() => {
+    if (!perfConfig?.useVirtualScrolling) {
+      throttledScrollToBottom();
+    }
+  }, [state.logs, perfConfig, throttledScrollToBottom]);
 
   // Glow effect when code updates
   useEffect(() => {
@@ -117,7 +168,10 @@ export const AgenticIDE: React.FC = () => {
     return ["generating", "executing", "fixing"].includes(state.currentPhase);
   };
 
-  const detectLanguage = (code: string): string => {
+  // Memoize language detection to avoid recomputation
+  const detectedLanguage = useMemo(() => {
+    if (!state.generatedCode) return "javascript";
+    const code = state.generatedCode;
     if (
       code.includes("import") ||
       code.includes("export") ||
@@ -129,7 +183,7 @@ export const AgenticIDE: React.FC = () => {
         : "javascript";
     }
     return "javascript";
-  };
+  }, [state.generatedCode]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-slate-900 to-gray-900 text-white p-8">
@@ -147,11 +201,11 @@ export const AgenticIDE: React.FC = () => {
         }
         
         .heartbeat-pulse {
-          animation: heartbeat 2s ease-in-out infinite;
+          animation: ${perfConfig?.reduceAnimations ? 'none' : 'heartbeat 2s ease-in-out infinite'};
         }
         
         .spinner {
-          animation: spin 1s linear infinite;
+          animation: ${perfConfig?.reduceAnimations ? 'spin 2s linear infinite' : 'spin 1s linear infinite'};
         }
         
         .copy-btn-glow {
@@ -447,26 +501,41 @@ export const AgenticIDE: React.FC = () => {
 
             {/* Syntax Highlighted Code */}
             <div className="overflow-x-auto min-h-[200px] code-container pb-10">
-              <SyntaxHighlighter
-                language={detectLanguage(state.generatedCode)}
-                style={vscDarkPlus}
-                customStyle={{
-                  margin: 0,
-                  padding: "1.5rem",
-                  paddingBottom: "2.5rem",
-                  background: "transparent",
-                  fontSize: "0.875rem",
-                  fontFamily: "'Fira Code', monospace",
-                  whiteSpace: "pre-wrap",
-                  wordBreak: "break-all",
-                  minHeight: "200px",
-                }}
-                showLineNumbers={true}
-                wrapLines={true}
-                lineNumberStyle={{ marginRight: "1rem", opacity: 0.5 }}
-              >
-                {state.generatedCode}
-              </SyntaxHighlighter>
+              {perfConfig?.syntaxHighlightingEnabled && highlighterStyle ? (
+                <Suspense
+                  fallback={
+                    <div className="p-6 text-gray-400 font-mono text-sm">
+                      Loading syntax highlighter...
+                    </div>
+                  }
+                >
+                  <SyntaxHighlighter
+                    language={detectedLanguage}
+                    style={highlighterStyle}
+                    customStyle={{
+                      margin: 0,
+                      padding: "1.5rem",
+                      paddingBottom: "2.5rem",
+                      background: "transparent",
+                      fontSize: "0.875rem",
+                      fontFamily: "'Fira Code', monospace",
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-all",
+                      minHeight: "200px",
+                    }}
+                    showLineNumbers={true}
+                    wrapLines={true}
+                    lineNumberStyle={{ marginRight: "1rem", opacity: 0.5 }}
+                  >
+                    {state.generatedCode}
+                  </SyntaxHighlighter>
+                </Suspense>
+              ) : (
+                <LightweightCodeViewer
+                  code={state.generatedCode}
+                  language={detectedLanguage}
+                />
+              )}
             </div>
           </div>
         )}
@@ -487,16 +556,23 @@ export const AgenticIDE: React.FC = () => {
 
           {/* Terminal Content */}
           <div className="p-6">
-            <div
-              className="bg-slate-950/70 rounded-lg p-4 max-h-[400px] overflow-y-auto text-sm border border-slate-700"
-              style={{ fontFamily: "'Fira Code', monospace" }}
-            >
-              {state.logs.length === 0 ? (
+            {optimizedLogs.length === 0 ? (
+              <div
+                className="bg-slate-950/70 rounded-lg p-4 text-sm border border-slate-700"
+                style={{ fontFamily: "'Fira Code', monospace" }}
+              >
                 <p className="text-gray-500 italic">
                   No logs yet. Initialize the engine to begin.
                 </p>
-              ) : (
-                state.logs.map((log, idx) => (
+              </div>
+            ) : perfConfig?.useVirtualScrolling ? (
+              <VirtualizedLogViewer logs={optimizedLogs} maxHeight={400} />
+            ) : (
+              <div
+                className="bg-slate-950/70 rounded-lg p-4 max-h-[400px] overflow-y-auto text-sm border border-slate-700"
+                style={{ fontFamily: "'Fira Code', monospace" }}
+              >
+                {optimizedLogs.map((log, idx) => (
                   <div
                     key={idx}
                     className={`mb-2 pb-2 border-b border-slate-800 last:border-0 ${
@@ -517,10 +593,10 @@ export const AgenticIDE: React.FC = () => {
                     </span>{" "}
                     {log.message}
                   </div>
-                ))
-              )}
-              <div ref={logsEndRef} />
-            </div>
+                ))}
+                <div ref={logsEndRef} />
+              </div>
+            )}
           </div>
         </div>
 
