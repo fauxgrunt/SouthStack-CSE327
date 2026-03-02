@@ -7,7 +7,6 @@ import React, {
   Suspense,
 } from "react";
 import { useAgenticLoop } from "../hooks/useAgenticLoop";
-import { MODEL_CONFIGS, ModelType } from "../hooks/useAgenticLoop";
 import { WindowControls } from "./WindowControls";
 import { LightweightCodeViewer } from "./LightweightCodeViewer";
 import { VirtualizedLogViewer } from "./VirtualizedLogViewer";
@@ -35,7 +34,6 @@ export const AgenticIDE: React.FC = () => {
     initializeEngine,
     executeAgenticLoop,
     cancelExecution,
-    changeModel,
     isReady,
   } = useAgenticLoop();
   const [userPrompt, setUserPrompt] = useState("");
@@ -127,10 +125,7 @@ export const AgenticIDE: React.FC = () => {
     }
   };
 
-  const handleModelChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const newModel = e.target.value as ModelType;
-    changeModel(newModel);
-  };
+  // Model selection removed - 0.5B is the only available model
 
   const formatStorageSize = (bytes: number): string => {
     const gb = bytes / (1024 * 1024 * 1024);
@@ -285,74 +280,39 @@ export const AgenticIDE: React.FC = () => {
               Step 1: Configure & Initialize
             </h2>
 
-            {/* Model Selector */}
+            {/* Engine Badge - Static Display */}
             <div className="mb-4">
-              <label
-                className="block text-sm font-medium text-gray-300 mb-2"
-                style={{ fontFamily: "'Fira Code', monospace" }}
-              >
-                Select Model:
-              </label>
-              <select
-                value={state.selectedModel}
-                onChange={handleModelChange}
-                disabled={state.isLoading}
-                className="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/50 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                style={{ fontFamily: "'Fira Code', monospace" }}
-              >
-                <option value="0.5B">
-                  {MODEL_CONFIGS["0.5B"].label} -{" "}
-                  {MODEL_CONFIGS["0.5B"].description}
-                </option>
-                <option value="1.5B">
-                  {MODEL_CONFIGS["1.5B"].label} -{" "}
-                  {MODEL_CONFIGS["1.5B"].description}
-                </option>
-              </select>
-
-              {/* Model Info & Warnings */}
-              <div className="mt-3 space-y-2">
-                {state.selectedModel === "1.5B" && (
-                  <div className="flex items-start gap-2 bg-orange-900/20 border border-orange-500/50 rounded-lg p-3">
-                    <span className="text-orange-400 text-lg font-bold">!</span>
-                    <div
-                      className="text-sm text-orange-300"
-                      style={{ fontFamily: "'Fira Code', monospace" }}
-                    >
-                      <div className="font-semibold mb-1">
-                        Pro Model Requirements:
-                      </div>
-                      <ul className="list-disc list-inside space-y-0.5 text-xs">
-                        <li>Requires ~1.5GB disk space</li>
-                        <li>
-                          Dedicated GPU recommended for optimal performance
-                        </li>
-                        <li>
-                          May take longer to download on slower connections
-                        </li>
-                      </ul>
-                    </div>
-                  </div>
-                )}
-
-                {state.storageAvailable !== null && (
-                  <div className="flex items-center gap-2 bg-blue-900/20 border border-blue-500/50 rounded-lg p-3">
-                    <span className="text-blue-400 text-lg font-bold">i</span>
-                    <div
-                      className="text-sm text-blue-300"
-                      style={{ fontFamily: "'Fira Code', monospace" }}
-                    >
-                      <span className="font-semibold">Available Storage:</span>{" "}
-                      {formatStorageSize(state.storageAvailable)}
-                      {state.storageAvailable < 2 * 1024 * 1024 * 1024 && (
-                        <span className="ml-2 text-orange-400">
-                          (Low - Standard model recommended)
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                )}
+              <div className="flex items-center gap-3">
+                <div className="inline-flex items-center gap-2 bg-gradient-to-r from-blue-600/20 to-purple-600/20 border border-blue-500/50 rounded-lg px-4 py-3">
+                  <div className="w-2 h-2 rounded-full bg-blue-400 shadow-lg shadow-blue-400/50"></div>
+                  <span
+                    className="text-sm font-semibold text-blue-300"
+                    style={{ fontFamily: "'Fira Code', monospace" }}
+                  >
+                    Engine: Standard (0.5B)
+                  </span>
+                </div>
+                <div
+                  className="text-xs text-gray-400"
+                  style={{ fontFamily: "'Fira Code', monospace" }}
+                >
+                  ~500MB • Optimized for all devices
+                </div>
               </div>
+
+              {/* Storage Info */}
+              {state.storageAvailable !== null && (
+                <div className="mt-3 flex items-center gap-2 bg-slate-800/50 border border-slate-600 rounded-lg p-3">
+                  <span className="text-blue-400 text-sm font-bold">ℹ</span>
+                  <div
+                    className="text-xs text-gray-300"
+                    style={{ fontFamily: "'Fira Code', monospace" }}
+                  >
+                    <span className="font-semibold">Available Storage:</span>{" "}
+                    {formatStorageSize(state.storageAvailable)}
+                  </div>
+                </div>
+              )}
             </div>
 
             <button
@@ -368,10 +328,7 @@ export const AgenticIDE: React.FC = () => {
                 className="mt-4 text-sm text-gray-400"
                 style={{ fontFamily: "'Fira Code', monospace" }}
               >
-                <p>
-                  Downloading {MODEL_CONFIGS[state.selectedModel].label}{" "}
-                  model...
-                </p>
+                <p>Downloading Standard 0.5B Engine (~500MB)...</p>
                 <p className="text-xs mt-2">
                   This happens once - then fully offline!
                 </p>
@@ -396,7 +353,7 @@ export const AgenticIDE: React.FC = () => {
                 </span>
               </div>
               <div className="text-xs text-gray-400 px-2 py-1 bg-slate-800 rounded border border-slate-600">
-                Model: {MODEL_CONFIGS[state.selectedModel].label}
+                Engine: Standard (0.5B)
               </div>
               <div
                 className={`text-sm font-medium ${getPhaseColor()} flex items-center gap-2`}

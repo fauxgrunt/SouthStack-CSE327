@@ -2,8 +2,8 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import * as webllm from "@mlc-ai/web-llm";
 import { limitArraySize } from "../utils/performance";
 
-// Model Configuration
-export type ModelType = "0.5B" | "1.5B";
+// Model Configuration - OPTIMIZED FOR 0.5B ONLY
+export type ModelType = "0.5B";
 
 // Maximum number of logs to keep in memory (prevent memory leaks)
 const MAX_LOG_ENTRIES = 500;
@@ -12,15 +12,16 @@ export const MODEL_CONFIGS = {
   "0.5B": {
     id: "Qwen2.5-Coder-0.5B-Instruct-q4f16_1-MLC",
     label: "Standard (0.5B)",
-    description: "Lightweight model - ~500MB",
+    description: "Optimized lightweight model - ~500MB",
     minStorage: 600 * 1024 * 1024, // 600MB
   },
-  "1.5B": {
-    id: "Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC",
-    label: "Pro (1.5B)",
-    description: "Advanced model - ~1.5GB (Requires dedicated GPU)",
-    minStorage: 1.6 * 1024 * 1024 * 1024, // 1.6GB
-  },
+  // 1.5B Model removed for optimized single-model deployment
+  // "1.5B": {
+  //   id: "Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC",
+  //   label: "Pro (1.5B)",
+  //   description: "Advanced model - ~1.5GB (Requires dedicated GPU)",
+  //   minStorage: 1.6 * 1024 * 1024 * 1024, // 1.6GB
+  // },
 };
 
 // Types
@@ -111,9 +112,9 @@ export const useAgenticLoop = () => {
   );
 
   /**
-   * Check available storage and recommend model
+   * Check available storage (informational only - 0.5B model is always used)
    */
-  const checkStorageAvailability = useCallback(async (): Promise<ModelType> => {
+  const checkStorageAvailability = useCallback(async (): Promise<void> => {
     try {
       if ("storage" in navigator && "estimate" in navigator.storage) {
         const estimate = await navigator.storage.estimate();
@@ -128,45 +129,21 @@ export const useAgenticLoop = () => {
           "info",
         );
 
-        // Auto-select model based on available space
-        if (available < 2 * 1024 * 1024 * 1024) {
-          // Less than 2GB
+        if (available < 1 * 1024 * 1024 * 1024) {
+          // Less than 1GB
           addLog(
             "storage",
-            "Low storage detected. Defaulting to 0.5B Standard model.",
+            "Low storage detected. 0.5B model requires ~600MB.",
             "warning",
           );
-          return "0.5B";
         }
       }
-      return "1.5B"; // Default to Pro if storage check not available or sufficient space
     } catch (error) {
-      addLog(
-        "storage",
-        "Could not estimate storage. Using Standard model.",
-        "warning",
-      );
-      return "0.5B";
+      addLog("storage", "Could not estimate storage.", "warning");
     }
   }, [addLog]);
 
-  /**
-   * Change selected model
-   */
-  const changeModel = useCallback(
-    (modelType: ModelType) => {
-      if (state.isInitialized) {
-        addLog("model", "Model change requires reinitialization", "warning");
-      }
-      setState((prev) => ({ ...prev, selectedModel: modelType }));
-      addLog(
-        "model",
-        `Model changed to: ${MODEL_CONFIGS[modelType].label}`,
-        "info",
-      );
-    },
-    [state.isInitialized, addLog],
-  );
+  // Model change functionality removed - 0.5B is the only available model
 
   /**
    * Initialize WebLLM Engine with WebGPU error handling
@@ -175,18 +152,15 @@ export const useAgenticLoop = () => {
     if (engineRef.current) return;
 
     setState((prev) => ({ ...prev, isLoading: true, error: null }));
-    addLog("initialization", "Starting WebLLM engine...", "info");
+    addLog(
+      "initialization",
+      "Initializing Standard 0.5B Optimized Engine...",
+      "info",
+    );
 
     try {
-      // Check storage availability first
-      const recommendedModel = await checkStorageAvailability();
-      if (
-        state.selectedModel !== recommendedModel &&
-        state.storageAvailable &&
-        state.storageAvailable < 2 * 1024 * 1024 * 1024
-      ) {
-        setState((prev) => ({ ...prev, selectedModel: recommendedModel }));
-      }
+      // Check storage availability (informational only)
+      await checkStorageAvailability();
 
       // Check WebGPU availability
       const navigatorWithGPU = navigator as typeof navigator & {
@@ -198,8 +172,12 @@ export const useAgenticLoop = () => {
         );
       }
 
-      const modelConfig = MODEL_CONFIGS[state.selectedModel];
-      addLog("initialization", `Loading ${modelConfig.label} model...`, "info");
+      const modelConfig = MODEL_CONFIGS["0.5B"];
+      addLog(
+        "initialization",
+        `Loading Standard 0.5B Optimized Engine (~500MB)...`,
+        "info",
+      );
 
       const engine = new webllm.MLCEngine();
       engineRef.current = engine;
@@ -212,7 +190,7 @@ export const useAgenticLoop = () => {
       // Load the model with OOM and Quota protection
       try {
         await engine.reload(modelConfig.id, {
-          context_window_size: state.selectedModel === "0.5B" ? 2048 : 2048, // Smaller context to prevent OOM
+          context_window_size: 2048, // Optimized context window for 0.5B
         });
       } catch (loadError: any) {
         // Handle Quota Exceeded Error (Storage limit)
@@ -234,8 +212,8 @@ export const useAgenticLoop = () => {
           loadError.message?.includes("allocation failed")
         ) {
           throw new Error(
-            "WebGPU Out of Memory. Try closing other tabs or use a smaller model. " +
-              "Available VRAM might be too low for this model.",
+            "WebGPU Out of Memory. Try closing other tabs or freeing up VRAM. " +
+              "The 0.5B model requires ~1GB VRAM.",
           );
         }
         throw loadError;
@@ -244,7 +222,11 @@ export const useAgenticLoop = () => {
       // Initialize mocked WebContainer
       webContainerRef.current = createMockedWebContainer();
 
-      addLog("initialization", "Engine ready - fully offline!", "success");
+      addLog(
+        "initialization",
+        "Standard 0.5B Engine ready - fully offline!",
+        "success",
+      );
       setState((prev) => ({ ...prev, isInitialized: true, isLoading: false }));
     } catch (error: any) {
       const errorMsg = error.message || "Failed to initialize WebLLM";
@@ -456,8 +438,6 @@ export const useAgenticLoop = () => {
     initializeEngine,
     executeAgenticLoop,
     cancelExecution,
-    changeModel,
-    checkStorageAvailability,
     isReady: state.isInitialized && !state.isLoading,
   };
 };
