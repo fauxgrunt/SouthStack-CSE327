@@ -1,6 +1,24 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import * as webllm from '@mlc-ai/web-llm';
 
+// Model Configuration
+export type ModelType = '0.5B' | '1.5B';
+
+export const MODEL_CONFIGS = {
+  '0.5B': {
+    id: 'Qwen2.5-Coder-0.5B-Instruct-q4f16_1-MLC',
+    label: 'Standard (0.5B)',
+    description: 'Lightweight model - ~500MB',
+    minStorage: 600 * 1024 * 1024, // 600MB
+  },
+  '1.5B': {
+    id: 'Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC',
+    label: 'Pro (1.5B)',
+    description: 'Advanced model - ~1.5GB (Requires dedicated GPU)',
+    minStorage: 1.6 * 1024 * 1024 * 1024, // 1.6GB
+  },
+};
+
 // Types
 interface AgenticLoopState {
   isInitialized: boolean;
@@ -11,6 +29,8 @@ interface AgenticLoopState {
   generatedCode: string | null;
   error: string | null;
   retryCount: number;
+  selectedModel: ModelType;
+  storageAvailable: number | null;
 }
 
 interface LogEntry {
@@ -34,7 +54,6 @@ interface WebContainerMock {
 }
 
 const MAX_RETRY_ATTEMPTS = 3;
-const MODEL_ID = 'Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC';
 
 /**
  * useAgenticLoop - Core hook for autonomous AI coding with self-healing
@@ -55,6 +74,8 @@ export const useAgenticLoop = () => {
     generatedCode: null,
     error: null,
     retryCount: 0,
+    selectedModel: '0.5B', // Default to lightweight model
+    storageAvailable: null,
   });
 
   const engineRef = useRef<webllm.MLCEngine | null>(null);
@@ -70,6 +91,44 @@ export const useAgenticLoop = () => {
   }, []);
 
   /**
+   * Check available storage and recommend model
+   */
+  const checkStorageAvailability = useCallback(async (): Promise<ModelType> => {
+    try {
+      if ('storage' in navigator && 'estimate' in navigator.storage) {
+        const estimate = await navigator.storage.estimate();
+        const available = (estimate.quota || 0) - (estimate.usage || 0);
+        
+        setState(prev => ({ ...prev, storageAvailable: available }));
+        
+        const availableGB = available / (1024 * 1024 * 1024);
+        addLog('storage', `Available storage: ${availableGB.toFixed(2)}GB`, 'info');
+        
+        // Auto-select model based on available space
+        if (available < 2 * 1024 * 1024 * 1024) { // Less than 2GB
+          addLog('storage', 'Low storage detected. Defaulting to 0.5B Standard model.', 'warning');
+          return '0.5B';
+        }
+      }
+      return '1.5B'; // Default to Pro if storage check not available or sufficient space
+    } catch (error) {
+      addLog('storage', 'Could not estimate storage. Using Standard model.', 'warning');
+      return '0.5B';
+    }
+  }, [addLog]);
+
+  /**
+   * Change selected model
+   */
+  const changeModel = useCallback((modelType: ModelType) => {
+    if (state.isInitialized) {
+      addLog('model', 'Model change requires reinitialization', 'warning');
+    }
+    setState(prev => ({ ...prev, selectedModel: modelType }));
+    addLog('model', `Model changed to: ${MODEL_CONFIGS[modelType].label}`, 'info');
+  }, [state.isInitialized, addLog]);
+
+  /**
    * Initialize WebLLM Engine with WebGPU error handling
    */
   const initializeEngine = useCallback(async () => {
@@ -79,10 +138,19 @@ export const useAgenticLoop = () => {
     addLog('initialization', 'Starting WebLLM engine...', 'info');
 
     try {
+      // Check storage availability first
+      const recommendedModel = await checkStorageAvailability();
+      if (state.selectedModel !== recommendedModel && state.storageAvailable && state.storageAvailable < 2 * 1024 * 1024 * 1024) {
+        setState(prev => ({ ...prev, selectedModel: recommendedModel }));
+      }
+
       // Check WebGPU availability
       if (!navigator.gpu) {
         throw new Error('WebGPU not supported in this browser. Please use Chrome/Edge 113+');
       }
+
+      const modelConfig = MODEL_CONFIGS[state.selectedModel];
+      addLog('initialization', `Loading ${modelConfig.label} model...`, 'info');
 
       const engine = new webllm.MLCEngine();
       engineRef.current = engine;
@@ -92,12 +160,22 @@ export const useAgenticLoop = () => {
         addLog('initialization', report.text, 'info');
       });
 
-      // Load the model with OOM protection
+      // Load the model with OOM and Quota protection
       try {
-        await engine.reload(MODEL_ID, {
-          context_window_size: 2048, // Smaller context to prevent OOM
+        await engine.reload(modelConfig.id, {
+          context_window_size: state.selectedModel === '0.5B' ? 2048 : 2048, // Smaller context to prevent OOM
         });
       } catch (loadError: any) {
+        // Handle Quota Exceeded Error (Storage limit)
+        if (loadError.name === 'QuotaExceededError' || 
+            loadError.message?.includes('quota') ||
+            loadError.message?.includes('storage')) {
+          throw new Error(
+            'Storage limit reached. Please free up disk space or switch to the 0.5B Standard model. ' +
+            'You may need to clear browser cache or delete unused PWA data.'
+          );
+        }
+        
         // Handle WebGPU OOM errors
         if (loadError.message?.includes('out of memory') || 
             loadError.message?.includes('OOM') ||
@@ -113,12 +191,12 @@ export const useAgenticLoop = () => {
       // Initialize mocked WebContainer
       webContainerRef.current = createMockedWebContainer();
 
-      addLog('initialization', '✅ Engine ready - fully offline!', 'success');
+      addLog('initialization', 'Engine ready - fully offline!', 'success');
       setState(prev => ({ ...prev, isInitialized: true, isLoading: false }));
 
     } catch (error: any) {
       const errorMsg = error.message || 'Failed to initialize WebLLM';
-      addLog('initialization', `❌ ${errorMsg}`, 'error');
+      addLog('initialization', `ERROR: ${errorMsg}`, 'error');
       setState(prev => ({ 
         ...prev, 
         isLoading: false, 
@@ -129,7 +207,7 @@ export const useAgenticLoop = () => {
       // Cleanup on failure
       engineRef.current = null;
     }
-  }, [addLog]);
+  }, [addLog, checkStorageAvailability, state.selectedModel, state.storageAvailable]);
 
   /**
    * Main Agentic Loop - Autonomous code generation with self-healing
@@ -171,7 +249,7 @@ export const useAgenticLoop = () => {
         // PHASE 1: Context Injection + Code Generation
         setState(prev => ({ ...prev, currentPhase: 'generating', retryCount: attempt }));
         
-        const systemPrompt = buildSystemPrompt(ragContext);
+        const systemPrompt = buildSystemPrompt(ragContext, state.selectedModel);
         const userMessage = attempt === 1 
           ? userPrompt 
           : buildFixPrompt(userPrompt, lastError!, currentCode!);
@@ -201,7 +279,7 @@ export const useAgenticLoop = () => {
           }
 
           setState(prev => ({ ...prev, generatedCode: currentCode }));
-          addLog('generation', `✅ Code generated (${currentCode.length} chars)`, 'success');
+          addLog('generation', `Code generated (${currentCode.length} chars)`, 'success');
 
         } catch (genError: any) {
           // Handle WebGPU OOM during generation
@@ -226,7 +304,7 @@ export const useAgenticLoop = () => {
 
         // PHASE 3: Result Analysis
         if (result.success) {
-          addLog('execution', '✅ Execution successful!', 'success');
+          addLog('execution', 'Execution successful!', 'success');
           addLog('execution', `Output: ${result.output}`, 'info');
           
           setState(prev => ({ 
@@ -239,7 +317,7 @@ export const useAgenticLoop = () => {
         } else {
           // PHASE 4: Self-Healing Loop
           lastError = result.error || 'Unknown execution error';
-          addLog('execution', `❌ Error: ${lastError}`, 'error');
+          addLog('execution', `ERROR: ${lastError}`, 'error');
           
           if (result.stackTrace) {
             addLog('execution', `Stack trace: ${result.stackTrace}`, 'error');
@@ -260,7 +338,7 @@ export const useAgenticLoop = () => {
 
     } catch (error: any) {
       const errorMsg = error.message || 'Unknown error in agentic loop';
-      addLog('execution', `❌ Fatal error: ${errorMsg}`, 'error');
+      addLog('execution', `FATAL ERROR: ${errorMsg}`, 'error');
       
       setState(prev => ({ 
         ...prev, 
@@ -299,6 +377,8 @@ export const useAgenticLoop = () => {
     initializeEngine,
     executeAgenticLoop,
     cancelExecution,
+    changeModel,
+    checkStorageAvailability,
     isReady: state.isInitialized && !state.isLoading,
   };
 };
@@ -308,9 +388,9 @@ export const useAgenticLoop = () => {
 // ============================================================================
 
 /**
- * Build system prompt with RAG context injection
+ * Build system prompt with RAG context injection and model-specific tuning
  */
-function buildSystemPrompt(ragContext?: string[]): string {
+function buildSystemPrompt(ragContext?: string[], modelType?: ModelType): string {
   let prompt = `You are an expert coding assistant embedded in SouthStack, an offline-first IDE.
 You generate clean, production-ready code that executes without errors.
 
@@ -320,6 +400,11 @@ Guidelines:
 - Handle errors gracefully
 - Use modern JavaScript/TypeScript practices
 - Ensure code runs in Node.js environment`;
+
+  // Prompt tuning for smaller models
+  if (modelType === '0.5B') {
+    prompt += `\n\nIMPORTANT: Be extremely concise. Use only standard Node.js core modules (fs, http, path, etc.). Do not explain the code. Focus on minimal, working implementations.`;
+  }
 
   if (ragContext && ragContext.length > 0) {
     prompt += `\n\nRelevant context from the project:\n${ragContext.join('\n\n')}`;

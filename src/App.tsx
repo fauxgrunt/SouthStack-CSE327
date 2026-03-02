@@ -542,7 +542,7 @@ const express = require('express');  // WRONG - express not available offline!`;
                     }`}
                     style={{ fontFamily: "'Fira Code', monospace" }}
                   >
-                    {codeCopied ? '✓ Copied!' : '📋 Copy Code'}
+                    {codeCopied ? 'Copied!' : 'Copy Code'}
                   </button>
                 </div>
                 
