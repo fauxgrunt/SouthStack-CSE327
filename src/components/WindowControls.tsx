@@ -1,5 +1,6 @@
 import React, { useEffect } from "react";
 import { motion } from "framer-motion";
+import { logger } from "../utils/logger";
 
 interface WindowControlsProps {
   currentPhase:
@@ -26,11 +27,9 @@ export const WindowControls: React.FC<WindowControlsProps> = ({
 
   // Debug logging
   useEffect(() => {
-    console.log("WindowControls - currentPhase:", currentPhase, {
-      isGenerating,
-      isExecuting,
-      isHealing,
-      hasError,
+    logger.debug("WindowControls phase changed", {
+      component: "WindowControls",
+      data: { currentPhase, isGenerating, isExecuting, isHealing, hasError },
     });
   }, [currentPhase, isGenerating, isExecuting, isHealing, hasError]);
 

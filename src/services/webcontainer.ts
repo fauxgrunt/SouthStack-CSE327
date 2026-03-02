@@ -1,8 +1,9 @@
-import { WebContainer } from '@webcontainer/api';
+import { WebContainer } from "@webcontainer/api";
+import { logger } from "../utils/logger";
 
 /**
  * WebContainer Service - Singleton Pattern
- * 
+ *
  * Manages the WebContainer instance for in-browser Node.js execution.
  * WebContainer provides a full Node.js runtime in the browser with:
  * - Virtual file system
@@ -63,21 +64,25 @@ class WebContainerService {
   private async _bootContainer(): Promise<WebContainer> {
     try {
       // Check if SharedArrayBuffer is available (required for WebContainer)
-      if (typeof SharedArrayBuffer === 'undefined') {
+      if (typeof SharedArrayBuffer === "undefined") {
         throw new Error(
-          'SharedArrayBuffer is not available. Make sure your server sends the correct COOP and COEP headers:\n' +
-          'Cross-Origin-Opener-Policy: same-origin\n' +
-          'Cross-Origin-Embedder-Policy: require-corp'
+          "SharedArrayBuffer is not available. Make sure your server sends the correct COOP and COEP headers:\n" +
+            "Cross-Origin-Opener-Policy: same-origin\n" +
+            "Cross-Origin-Embedder-Policy: require-corp",
         );
       }
 
-      console.log('[WebContainer] Booting...');
+      logger.info("Booting WebContainer...", { component: "WebContainer" });
       const container = await WebContainer.boot();
-      console.log('[WebContainer] Successfully booted!');
-      
+      logger.info("WebContainer successfully booted!", {
+        component: "WebContainer",
+      });
+
       return container;
     } catch (error: any) {
-      console.error('[WebContainer] Boot failed:', error);
+      logger.error("WebContainer boot failed", error, {
+        component: "WebContainer",
+      });
       throw new Error(`Failed to boot WebContainer: ${error.message}`);
     }
   }
@@ -88,7 +93,7 @@ class WebContainerService {
    */
   public getContainer(): WebContainer {
     if (!this.container) {
-      throw new Error('WebContainer not booted. Call boot() first.');
+      throw new Error("WebContainer not booted. Call boot() first.");
     }
     return this.container;
   }
@@ -105,12 +110,16 @@ class WebContainerService {
    */
   public async writeFile(path: string, content: string): Promise<void> {
     const container = this.getContainer();
-    
+
     try {
       await container.fs.writeFile(path, content);
-      console.log(`[WebContainer] Wrote file: ${path} (${content.length} bytes)`);
+      logger.debug(`Wrote file: ${path} (${content.length} bytes)`, {
+        component: "WebContainer",
+      });
     } catch (error: any) {
-      console.error(`[WebContainer] Failed to write file ${path}:`, error);
+      logger.error(`Failed to write file ${path}`, error, {
+        component: "WebContainer",
+      });
       throw new Error(`Failed to write file ${path}: ${error.message}`);
     }
   }
@@ -120,12 +129,14 @@ class WebContainerService {
    */
   public async readFile(path: string): Promise<string> {
     const container = this.getContainer();
-    
+
     try {
-      const content = await container.fs.readFile(path, 'utf-8');
+      const content = await container.fs.readFile(path, "utf-8");
       return content;
     } catch (error: any) {
-      console.error(`[WebContainer] Failed to read file ${path}:`, error);
+      logger.error(`Failed to read file ${path}`, error, {
+        component: "WebContainer",
+      });
       throw new Error(`Failed to read file ${path}: ${error.message}`);
     }
   }
@@ -135,14 +146,16 @@ class WebContainerService {
    */
   public async mkdir(path: string): Promise<void> {
     const container = this.getContainer();
-    
+
     try {
       await container.fs.mkdir(path, { recursive: true });
-      console.log(`[WebContainer] Created directory: ${path}`);
+      logger.debug(`Created directory: ${path}`, { component: "WebContainer" });
     } catch (error: any) {
       // Ignore if directory already exists
-      if (!error.message?.includes('exists')) {
-        console.error(`[WebContainer] Failed to create directory ${path}:`, error);
+      if (!error.message?.includes("exists")) {
+        logger.error(`Failed to create directory ${path}`, error, {
+          component: "WebContainer",
+        });
         throw new Error(`Failed to create directory ${path}: ${error.message}`);
       }
     }
@@ -155,12 +168,14 @@ class WebContainerService {
   public async spawn(
     command: string,
     args: string[] = [],
-    options?: { cwd?: string; env?: Record<string, string> }
+    options?: { cwd?: string; env?: Record<string, string> },
   ) {
     const container = this.getContainer();
-    
+
     try {
-      console.log(`[WebContainer] Spawning: ${command} ${args.join(' ')}`);
+      logger.debug(`Spawning: ${command} ${args.join(" ")}`, {
+        component: "WebContainer",
+      });
       const process = await container.spawn(command, args, {
         ...options,
         terminal: {
@@ -168,10 +183,12 @@ class WebContainerService {
           rows: 30,
         },
       });
-      
+
       return process;
     } catch (error: any) {
-      console.error(`[WebContainer] Failed to spawn ${command}:`, error);
+      logger.error(`Failed to spawn ${command}`, error, {
+        component: "WebContainer",
+      });
       throw new Error(`Failed to spawn ${command}: ${error.message}`);
     }
   }
@@ -183,26 +200,28 @@ class WebContainerService {
   public async exec(
     command: string,
     args: string[] = [],
-    options?: { cwd?: string }
+    options?: { cwd?: string },
   ): Promise<{ exitCode: number; output: string }> {
     const process = await this.spawn(command, args, options);
-    
-    let output = '';
-    
+
+    let output = "";
+
     // Capture stdout
     process.output.pipeTo(
       new WritableStream({
         write(chunk) {
           output += chunk;
         },
-      })
+      }),
     );
 
     // Wait for process to complete
     const exitCode = await process.exit;
-    
-    console.log(`[WebContainer] Process exited with code: ${exitCode}`);
-    
+
+    logger.debug(`Process exited with code: ${exitCode}`, {
+      component: "WebContainer",
+    });
+
     return { exitCode, output };
   }
 
@@ -211,15 +230,20 @@ class WebContainerService {
    * Useful for initializing a project structure
    */
   public async mount(
-    files: Record<string, { file: { contents: string } } | { directory: Record<string, any> }>
+    files: Record<
+      string,
+      { file: { contents: string } } | { directory: Record<string, any> }
+    >,
   ): Promise<void> {
     const container = this.getContainer();
-    
+
     try {
       await container.mount(files);
-      console.log('[WebContainer] Mounted file structure');
+      logger.debug("Mounted file structure", { component: "WebContainer" });
     } catch (error: any) {
-      console.error('[WebContainer] Failed to mount files:', error);
+      logger.error("Failed to mount files", error, {
+        component: "WebContainer",
+      });
       throw new Error(`Failed to mount files: ${error.message}`);
     }
   }
@@ -230,10 +254,10 @@ class WebContainerService {
    */
   public async getServerUrl(port: number = 3000): Promise<string> {
     this.getContainer();
-    
+
     // Wait for server to be ready (simple polling)
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+
     // WebContainer provides a unique URL for each port
     return `http://localhost:${port}`;
   }

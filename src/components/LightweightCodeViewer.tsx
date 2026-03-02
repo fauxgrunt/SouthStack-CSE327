@@ -1,4 +1,4 @@
-import { memo } from 'react';
+import { memo } from "react";
 
 /**
  * LightweightCodeViewer - A plain text code viewer without syntax highlighting
@@ -9,12 +9,14 @@ interface LightweightCodeViewerProps {
   language?: string;
 }
 
-export const LightweightCodeViewer = memo<LightweightCodeViewerProps>(({ code }) => {
-  return (
-    <pre className="bg-gray-950 text-gray-100 p-4 rounded-lg overflow-auto font-mono text-sm leading-relaxed">
-      <code>{code}</code>
-    </pre>
-  );
-});
+export const LightweightCodeViewer = memo<LightweightCodeViewerProps>(
+  ({ code }) => {
+    return (
+      <pre className="bg-gray-950 text-gray-100 p-4 rounded-lg overflow-auto font-mono text-sm leading-relaxed">
+        <code>{code}</code>
+      </pre>
+    );
+  },
+);
 
-LightweightCodeViewer.displayName = 'LightweightCodeViewer';
+LightweightCodeViewer.displayName = "LightweightCodeViewer";

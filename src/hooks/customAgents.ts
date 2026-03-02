@@ -1,9 +1,9 @@
-import { useRef } from 'react';
-import * as webllm from '@mlc-ai/web-llm';
+import { useRef } from "react";
+import * as webllm from "@mlc-ai/web-llm";
 
 /**
  * Example: Custom Agent for Test Generation
- * 
+ *
  * This demonstrates how to extend the agentic loop architecture
  * with specialized agents for different tasks.
  */
@@ -29,10 +29,10 @@ export const useTestAgent = () => {
    */
   const generateTests = async (
     sourceCode: string,
-    testingFramework: 'jest' | 'vitest' | 'mocha' = 'jest'
+    testingFramework: "jest" | "vitest" | "mocha" = "jest",
   ): Promise<TestGenerationResult> => {
     if (!engineRef.current) {
-      throw new Error('Test agent not initialized');
+      throw new Error("Test agent not initialized");
     }
 
     const systemPrompt = `You are a test generation expert.
@@ -56,15 +56,15 @@ Return ONLY the test code, no explanations.`;
     try {
       const completion = await engineRef.current.chat.completions.create({
         messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
         ],
         temperature: 0.5, // Lower temperature for more consistent test generation
         max_tokens: 1024,
       });
 
-      const testCode = extractCode(completion.choices[0].message.content || '');
-      
+      const testCode = extractCode(completion.choices[0].message.content || "");
+
       // Extract covered scenarios from test descriptions
       const coverage = extractCoverageScenarios(testCode);
 
@@ -75,7 +75,7 @@ Return ONLY the test code, no explanations.`;
       };
     } catch (error: any) {
       return {
-        testCode: '',
+        testCode: "",
         coverage: [],
         success: false,
       };
@@ -101,10 +101,10 @@ export const useDebugAgent = () => {
   const analyzeError = async (
     code: string,
     error: string,
-    stackTrace?: string
+    stackTrace?: string,
   ) => {
     if (!engineRef.current) {
-      throw new Error('Debug agent not initialized');
+      throw new Error("Debug agent not initialized");
     }
 
     const systemPrompt = `You are an expert debugger.
@@ -125,20 +125,20 @@ ${code}
 
 ERROR: ${error}
 
-${stackTrace ? `STACK TRACE:\n${stackTrace}` : ''}
+${stackTrace ? `STACK TRACE:\n${stackTrace}` : ""}
 
 Provide analysis and fixed code.`;
 
     const completion = await engineRef.current.chat.completions.create({
       messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
       ],
       temperature: 0.3,
       max_tokens: 1500,
     });
 
-    return parseDebugResponse(completion.choices[0].message.content || '');
+    return parseDebugResponse(completion.choices[0].message.content || "");
   };
 
   return { initialize, analyzeError };
@@ -159,14 +159,14 @@ export const useRefactorAgent = () => {
    */
   const suggestRefactoring = async (
     code: string,
-    goals: string[] = ['readability', 'performance', 'maintainability']
+    goals: string[] = ["readability", "performance", "maintainability"],
   ) => {
     if (!engineRef.current) {
-      throw new Error('Refactor agent not initialized');
+      throw new Error("Refactor agent not initialized");
     }
 
     const systemPrompt = `You are a code refactoring expert.
-Suggest improvements focusing on: ${goals.join(', ')}.
+Suggest improvements focusing on: ${goals.join(", ")}.
 
 Principles:
 - DRY (Don't Repeat Yourself)
@@ -185,14 +185,14 @@ Provide refactored version with explanation of changes.`;
 
     const completion = await engineRef.current.chat.completions.create({
       messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
       ],
       temperature: 0.6,
       max_tokens: 1500,
     });
 
-    return parseRefactorResponse(completion.choices[0].message.content || '');
+    return parseRefactorResponse(completion.choices[0].message.content || "");
   };
 
   return { initialize, suggestRefactoring };
@@ -200,7 +200,7 @@ Provide refactored version with explanation of changes.`;
 
 /**
  * Example: Multi-Agent Coordinator
- * 
+ *
  * Orchestrates multiple specialized agents to complete complex tasks
  */
 export const useMultiAgentCoordinator = () => {
@@ -219,7 +219,7 @@ export const useMultiAgentCoordinator = () => {
    */
   const completeWorkflow = async (
     initialCode: string,
-    _requirements: string
+    _requirements: string,
   ) => {
     const workflow = {
       steps: [] as any[],
@@ -229,25 +229,37 @@ export const useMultiAgentCoordinator = () => {
 
     try {
       // Step 1: Generate tests
-      workflow.steps.push({ phase: 'test-generation', status: 'started' });
+      workflow.steps.push({ phase: "test-generation", status: "started" });
       const tests = await testAgent.generateTests(initialCode);
-      workflow.steps.push({ phase: 'test-generation', status: 'completed', data: tests });
+      workflow.steps.push({
+        phase: "test-generation",
+        status: "completed",
+        data: tests,
+      });
 
       // Step 2: If tests reveal issues, debug
       // (In real implementation, would execute tests and check results)
-      
+
       // Step 3: Refactor for quality
-      workflow.steps.push({ phase: 'refactoring', status: 'started' });
+      workflow.steps.push({ phase: "refactoring", status: "started" });
       const refactored = await refactorAgent.suggestRefactoring(initialCode, [
-        'readability',
-        'performance'
+        "readability",
+        "performance",
       ]);
-      workflow.steps.push({ phase: 'refactoring', status: 'completed', data: refactored });
+      workflow.steps.push({
+        phase: "refactoring",
+        status: "completed",
+        data: refactored,
+      });
 
       workflow.finalCode = refactored.code;
       workflow.success = true;
     } catch (error: any) {
-      workflow.steps.push({ phase: 'error', status: 'failed', error: error.message });
+      workflow.steps.push({
+        phase: "error",
+        status: "failed",
+        error: error.message,
+      });
     }
 
     return workflow;
@@ -261,7 +273,9 @@ export const useMultiAgentCoordinator = () => {
 // ============================================================================
 
 function extractCode(response: string): string {
-  const codeBlockMatch = response.match(/```(?:javascript|js|typescript|ts)?\n([\s\S]*?)\n```/);
+  const codeBlockMatch = response.match(
+    /```(?:javascript|js|typescript|ts)?\n([\s\S]*?)\n```/,
+  );
   if (codeBlockMatch) {
     return codeBlockMatch[1].trim();
   }
@@ -270,30 +284,36 @@ function extractCode(response: string): string {
 
 function extractCoverageScenarios(testCode: string): string[] {
   const scenarios: string[] = [];
-  
+
   // Extract test descriptions (e.g., "it('should handle empty input')")
-  const testMatches = testCode.matchAll(/(?:it|test)\s*\(\s*['"`]([^'"`]+)['"`]/g);
-  
+  const testMatches = testCode.matchAll(
+    /(?:it|test)\s*\(\s*['"`]([^'"`]+)['"`]/g,
+  );
+
   for (const match of testMatches) {
     scenarios.push(match[1]);
   }
-  
+
   return scenarios;
 }
 
 function parseDebugResponse(response: string) {
   // Simple parser - in production, use structured output
   const sections = {
-    analysis: '',
-    fix: '',
-    code: '',
-    tips: '',
+    analysis: "",
+    fix: "",
+    code: "",
+    tips: "",
   };
 
-  const analysisMatch = response.match(/(?:root cause|analysis)[:\s]+([\s\S]*?)(?=\n\n|fix|code)/i);
+  const analysisMatch = response.match(
+    /(?:root cause|analysis)[:\s]+([\s\S]*?)(?=\n\n|fix|code)/i,
+  );
   if (analysisMatch) sections.analysis = analysisMatch[1].trim();
 
-  const fixMatch = response.match(/(?:fix|solution)[:\s]+([\s\S]*?)(?=\n\n|code|prevention)/i);
+  const fixMatch = response.match(
+    /(?:fix|solution)[:\s]+([\s\S]*?)(?=\n\n|code|prevention)/i,
+  );
   if (fixMatch) sections.fix = fixMatch[1].trim();
 
   sections.code = extractCode(response);
@@ -307,21 +327,21 @@ function parseDebugResponse(response: string) {
 function parseRefactorResponse(response: string) {
   return {
     code: extractCode(response),
-    explanation: response.replace(/```[\s\S]*?```/g, '').trim(),
+    explanation: response.replace(/```[\s\S]*?```/g, "").trim(),
     improvements: extractImprovements(response),
   };
 }
 
 function extractImprovements(response: string): string[] {
   const improvements: string[] = [];
-  
+
   // Look for bullet points or numbered lists
   const listMatches = response.matchAll(/^[\s]*[-*•]\s*(.+)$/gm);
-  
+
   for (const match of listMatches) {
     improvements.push(match[1].trim());
   }
-  
+
   return improvements;
 }
 

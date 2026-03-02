@@ -5,6 +5,7 @@ This document details all the performance optimizations implemented in SouthStac
 ## Overview
 
 The IDE now includes comprehensive performance optimizations that:
+
 - **Detect device capability** automatically
 - **Adapt rendering strategy** based on hardware
 - **Minimize memory usage** through intelligent caching
@@ -30,14 +31,14 @@ The application automatically detects device capability on startup:
 
 Based on detected capability, the app adjusts:
 
-| Feature | Low-End | Medium | High-End |
-|---------|---------|--------|----------|
-| **Max Logs** | 100 | 300 | 1000 |
-| **Syntax Highlighting** | Disabled | Enabled | Enabled |
-| **Scroll Behavior** | Auto (instant) | Smooth | Smooth |
-| **Virtual Scrolling** | Enabled | Disabled | Disabled |
-| **Animations** | Reduced | Full | Full |
-| **Auto-scroll Throttle** | 200ms | 100ms | 50ms |
+| Feature                  | Low-End        | Medium   | High-End |
+| ------------------------ | -------------- | -------- | -------- |
+| **Max Logs**             | 100            | 300      | 1000     |
+| **Syntax Highlighting**  | Disabled       | Enabled  | Enabled  |
+| **Scroll Behavior**      | Auto (instant) | Smooth   | Smooth   |
+| **Virtual Scrolling**    | Enabled        | Disabled | Disabled |
+| **Animations**           | Reduced        | Full     | Full     |
+| **Auto-scroll Throttle** | 200ms          | 100ms    | 50ms     |
 
 **Location:** `src/utils/performance.ts` → `getPerformanceConfig()`
 
@@ -49,12 +50,11 @@ Based on detected capability, the app adjusts:
 
 ```typescript
 // Only loaded for medium/high-end devices
-const SyntaxHighlighter = lazy(() => 
-  import("react-syntax-highlighter")
-);
+const SyntaxHighlighter = lazy(() => import("react-syntax-highlighter"));
 ```
 
-**Impact:** 
+**Impact:**
+
 - Low-end devices: Skip syntax highlighter entirely
 - Medium/high-end: Load on-demand with suspense fallback
 - Initial bundle ~500KB smaller
@@ -70,6 +70,7 @@ For low-end devices, we use a plain `<pre><code>` block instead of syntax highli
 ```
 
 **Benefits:**
+
 - Zero parsing overhead
 - Instant rendering
 - No memory spike
@@ -89,6 +90,7 @@ For low-end devices, we use a plain `<pre><code>` block instead of syntax highli
 ```
 
 **Performance Gain:**
+
 - **Before:** O(n) rendering for all logs
 - **After:** O(1) constant rendering regardless of log count
 - Tested with 10,000 logs: Still smooth 60fps scrolling
@@ -104,19 +106,21 @@ For low-end devices, we use a plain `<pre><code>` block instead of syntax highli
 ```typescript
 // Automatically limits to MAX_LOG_ENTRIES
 const addLog = (message) => {
-  setState(prev => ({
+  setState((prev) => ({
     ...prev,
-    logs: limitArraySize([...prev.logs, newLog], MAX_LOG_ENTRIES)
+    logs: limitArraySize([...prev.logs, newLog], MAX_LOG_ENTRIES),
   }));
 };
 ```
 
 **Impact:**
+
 - Low-end: Max 100 logs (~10KB memory)
 - Medium: Max 300 logs (~30KB memory)
 - High-end: Max 1000 logs (~100KB memory)
 
-**Location:** 
+**Location:**
+
 - `src/hooks/useAgenticLoop.ts` (hook-level limiting)
 - `src/components/AgenticIDE.tsx` (display-level limiting)
 
@@ -141,12 +145,13 @@ const optimizedLogs = useMemo(() => {
 ```typescript
 // Throttle auto-scroll to reduce reflows
 const throttledScrollToBottom = useMemo(
-  () => throttle(() => {
-    logsEndRef.current?.scrollIntoView({
-      behavior: perfConfig.scrollBehavior
-    });
-  }, perfConfig.autoScrollThrottle),
-  [perfConfig]
+  () =>
+    throttle(() => {
+      logsEndRef.current?.scrollIntoView({
+        behavior: perfConfig.scrollBehavior,
+      });
+    }, perfConfig.autoScrollThrottle),
+  [perfConfig],
 );
 ```
 
@@ -179,11 +184,15 @@ On low-end devices, animations are reduced or disabled:
 
 ```css
 .heartbeat-pulse {
-  animation: ${reduceAnimations ? 'none' : 'heartbeat 2s infinite'};
+  animation: $ {
+    reduceanimations? 'none' : "heartbeat 2s infinite";
+  }
 }
 
 .spinner {
-  animation: ${reduceAnimations ? 'spin 2s' : 'spin 1s'};
+  animation: $ {
+    reduceanimations? 'spin 2s' : "spin 1s";
+  }
 }
 ```
 
@@ -193,7 +202,7 @@ Simple LRU cache for memoization with automatic eviction:
 
 ```typescript
 const cache = new LRUCache<string, string>(50);
-cache.set('key', 'value'); // Auto-evicts oldest if size > 50
+cache.set("key", "value"); // Auto-evicts oldest if size > 50
 ```
 
 **Location:** `src/utils/performance.ts`
@@ -203,20 +212,21 @@ cache.set('key', 'value'); // Auto-evicts oldest if size > 50
 ### Before Optimization
 
 | Device Type | Initial Load | Log Scroll (1000 items) | Memory Usage |
-|-------------|--------------|-------------------------|--------------|
-| Low-end | 8.5s | 15fps (janky) | 250MB |
-| Medium | 4.2s | 45fps | 180MB |
-| High-end | 2.1s | 60fps | 150MB |
+| ----------- | ------------ | ----------------------- | ------------ |
+| Low-end     | 8.5s         | 15fps (janky)           | 250MB        |
+| Medium      | 4.2s         | 45fps                   | 180MB        |
+| High-end    | 2.1s         | 60fps                   | 150MB        |
 
 ### After Optimization
 
 | Device Type | Initial Load | Log Scroll (1000 items) | Memory Usage |
-|-------------|--------------|-------------------------|--------------|
-| Low-end | **3.5s** ⚡ | **60fps** ⚡ | **80MB** ⚡ |
-| Medium | **2.8s** ⚡ | **60fps** ⚡ | **120MB** ⚡ |
-| High-end | **1.8s** ⚡ | **60fps** ⚡ | **140MB** ⚡ |
+| ----------- | ------------ | ----------------------- | ------------ |
+| Low-end     | **3.5s** ⚡  | **60fps** ⚡            | **80MB** ⚡  |
+| Medium      | **2.8s** ⚡  | **60fps** ⚡            | **120MB** ⚡ |
+| High-end    | **1.8s** ⚡  | **60fps** ⚡            | **140MB** ⚡ |
 
 **Improvements:**
+
 - ⚡ **59% faster** load on low-end devices
 - ⚡ **4x smoother** scrolling (15fps → 60fps)
 - ⚡ **68% less memory** on low-end devices
@@ -227,9 +237,9 @@ cache.set('key', 'value'); // Auto-evicts oldest if size > 50
 
 ```typescript
 // Force performance mode
-import { getPerformanceConfig } from './utils/performance';
+import { getPerformanceConfig } from "./utils/performance";
 
-const config = getPerformanceConfig('low'); // Force low-end mode
+const config = getPerformanceConfig("low"); // Force low-end mode
 ```
 
 ### Custom Log Limits
@@ -243,16 +253,16 @@ const MAX_LOG_ENTRIES = 200; // Custom limit
 
 ```typescript
 // In PerformanceConfig
-useVirtualScrolling: false // Always use regular rendering
+useVirtualScrolling: false; // Always use regular rendering
 ```
 
 ## Browser Requirements
 
-| Browser | Version | WebGPU | Performance Tier |
-|---------|---------|--------|------------------|
-| Chrome | 113+ | ✅ | All tiers |
-| Edge | 113+ | ✅ | All tiers |
-| Safari | 17+ | ⚠️ Limited | Low/Medium only |
+| Browser | Version      | WebGPU           | Performance Tier |
+| ------- | ------------ | ---------------- | ---------------- |
+| Chrome  | 113+         | ✅               | All tiers        |
+| Edge    | 113+         | ✅               | All tiers        |
+| Safari  | 17+          | ⚠️ Limited       | Low/Medium only  |
 | Firefox | ❌ No WebGPU | ❌ Not supported |
 
 ## Best Practices for Developers
@@ -275,10 +285,10 @@ useVirtualScrolling: false // Always use regular rendering
 
 ```javascript
 // ❌ Bad
-import HeavyLibrary from 'heavy-library';
+import HeavyLibrary from "heavy-library";
 
 // ✅ Good
-const HeavyLibrary = lazy(() => import('heavy-library'));
+const HeavyLibrary = lazy(() => import("heavy-library"));
 ```
 
 ### 4. **Use performance monitoring**
@@ -286,9 +296,9 @@ const HeavyLibrary = lazy(() => import('heavy-library'));
 ```javascript
 // Add to your component
 useEffect(() => {
-  const perfMarker = performance.mark('component-render');
+  const perfMarker = performance.mark("component-render");
   return () => {
-    performance.measure('component-render', perfMarker);
+    performance.measure("component-render", perfMarker);
   };
 }, []);
 ```
@@ -298,7 +308,7 @@ useEffect(() => {
 ```javascript
 // Start with basic functionality
 // Enhance for capable devices
-if (deviceCapability === 'high') {
+if (deviceCapability === "high") {
   enableAdvancedFeatures();
 }
 ```
@@ -308,6 +318,7 @@ if (deviceCapability === 'high') {
 ### Issue: App still slow on low-end device
 
 **Solution:**
+
 1. Check Chrome DevTools → Performance tab
 2. Look for long tasks (> 50ms)
 3. Verify virtual scrolling is enabled
@@ -316,6 +327,7 @@ if (deviceCapability === 'high') {
 ### Issue: Memory keeps growing
 
 **Solution:**
+
 1. Check log array length: should cap at MAX_LOG_ENTRIES
 2. Look for event listener leaks
 3. Verify WebLLM model is properly cleaned up
@@ -324,6 +336,7 @@ if (deviceCapability === 'high') {
 ### Issue: Syntax highlighting not loading
 
 **Solution:**
+
 1. Check device capability detection result
 2. Verify network is available for lazy loading
 3. Check browser console for import errors

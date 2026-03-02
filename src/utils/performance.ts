@@ -7,16 +7,16 @@
  */
 export function debounce<T extends (...args: unknown[]) => unknown>(
   func: T,
-  wait: number
+  wait: number,
 ): (...args: Parameters<T>) => void {
   let timeout: ReturnType<typeof setTimeout> | null = null;
-  
+
   return function executedFunction(...args: Parameters<T>) {
     const later = () => {
       timeout = null;
       func(...args);
     };
-    
+
     if (timeout) clearTimeout(timeout);
     timeout = setTimeout(later, wait);
   };
@@ -27,10 +27,10 @@ export function debounce<T extends (...args: unknown[]) => unknown>(
  */
 export function throttle<T extends unknown[]>(
   func: (...args: T) => void,
-  limit: number
+  limit: number,
 ): (...args: T) => void {
   let inThrottle: boolean;
-  
+
   return function executedFunction(...args: T) {
     if (!inThrottle) {
       func(...args);
@@ -51,22 +51,26 @@ export function limitArraySize<T>(array: T[], maxSize: number): T[] {
 /**
  * Check if device is low-end based on hardware capabilities
  */
-export async function detectDeviceCapability(): Promise<'low' | 'medium' | 'high'> {
+export async function detectDeviceCapability(): Promise<
+  "low" | "medium" | "high"
+> {
   // Check hardware concurrency (CPU cores)
   const cores = navigator.hardwareConcurrency || 2;
-  
+
   // Check memory (if available)
   const deviceMemory = (navigator as { deviceMemory?: number }).deviceMemory;
   const memory = deviceMemory || 4; // GB
-  
+
   // Check GPU tier (if WebGPU available)
-  let gpuTier: 'low' | 'medium' | 'high' = 'medium';
-  const navigatorWithGPU = navigator as typeof navigator & { 
-    gpu?: { 
-      requestAdapter: () => Promise<{ limits: { maxBufferSize: number } } | null> 
-    } 
+  let gpuTier: "low" | "medium" | "high" = "medium";
+  const navigatorWithGPU = navigator as typeof navigator & {
+    gpu?: {
+      requestAdapter: () => Promise<{
+        limits: { maxBufferSize: number };
+      } | null>;
+    };
   };
-  
+
   if (navigatorWithGPU.gpu) {
     try {
       const adapter = await navigatorWithGPU.gpu.requestAdapter();
@@ -74,25 +78,25 @@ export async function detectDeviceCapability(): Promise<'low' | 'medium' | 'high
         const limits = adapter.limits;
         // Basic heuristic based on max buffer size
         if (limits.maxBufferSize < 256 * 1024 * 1024) {
-          gpuTier = 'low';
+          gpuTier = "low";
         } else if (limits.maxBufferSize > 1024 * 1024 * 1024) {
-          gpuTier = 'high';
+          gpuTier = "high";
         }
       }
     } catch {
-      gpuTier = 'low';
+      gpuTier = "low";
     }
   } else {
-    gpuTier = 'low';
+    gpuTier = "low";
   }
-  
+
   // Determine overall capability
-  if (cores <= 2 || memory <= 2 || gpuTier === 'low') {
-    return 'low';
-  } else if (cores >= 8 && memory >= 8 && gpuTier === 'high') {
-    return 'high';
+  if (cores <= 2 || memory <= 2 || gpuTier === "low") {
+    return "low";
+  } else if (cores >= 8 && memory >= 8 && gpuTier === "high") {
+    return "high";
   }
-  return 'medium';
+  return "medium";
 }
 
 /**
@@ -108,32 +112,32 @@ export interface PerformanceConfig {
 }
 
 export function getPerformanceConfig(
-  capability: 'low' | 'medium' | 'high'
+  capability: "low" | "medium" | "high",
 ): PerformanceConfig {
   switch (capability) {
-    case 'low':
+    case "low":
       return {
         maxLogs: 100,
-        scrollBehavior: 'auto',
+        scrollBehavior: "auto",
         syntaxHighlightingEnabled: false, // Disable expensive syntax highlighting
         autoScrollThrottle: 200,
         useVirtualScrolling: true,
         reduceAnimations: true,
       };
-    case 'medium':
+    case "medium":
       return {
         maxLogs: 300,
-        scrollBehavior: 'smooth',
+        scrollBehavior: "smooth",
         syntaxHighlightingEnabled: true,
         autoScrollThrottle: 100,
         useVirtualScrolling: false,
         reduceAnimations: false,
       };
-    case 'high':
+    case "high":
     default:
       return {
         maxLogs: 1000,
-        scrollBehavior: 'smooth',
+        scrollBehavior: "smooth",
         syntaxHighlightingEnabled: true,
         autoScrollThrottle: 50,
         useVirtualScrolling: false,
@@ -156,7 +160,7 @@ export class LRUCache<K, V> {
 
   get(key: K): V | undefined {
     if (!this.cache.has(key)) return undefined;
-    
+
     // Move to end (most recently used)
     const value = this.cache.get(key)!;
     this.cache.delete(key);
@@ -169,10 +173,10 @@ export class LRUCache<K, V> {
     if (this.cache.has(key)) {
       this.cache.delete(key);
     }
-    
+
     // Add to end
     this.cache.set(key, value);
-    
+
     // Evict oldest if over size
     if (this.cache.size > this.maxSize) {
       const firstKey = this.cache.keys().next().value as K;

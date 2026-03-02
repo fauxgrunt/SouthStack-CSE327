@@ -1,4 +1,11 @@
-import React, { useState, useEffect, useRef, useMemo, lazy, Suspense } from "react";
+import React, {
+  useState,
+  useEffect,
+  useRef,
+  useMemo,
+  lazy,
+  Suspense,
+} from "react";
 import { useAgenticLoop } from "../hooks/useAgenticLoop";
 import { MODEL_CONFIGS, ModelType } from "../hooks/useAgenticLoop";
 import { WindowControls } from "./WindowControls";
@@ -9,14 +16,14 @@ import {
   getPerformanceConfig,
   throttle,
   limitArraySize,
-  type PerformanceConfig
+  type PerformanceConfig,
 } from "../utils/performance";
 
 // Lazy load heavy syntax highlighter
 const SyntaxHighlighter = lazy(() =>
   import("react-syntax-highlighter").then((module) => ({
     default: module.Prism,
-  }))
+  })),
 );
 
 /**
@@ -46,9 +53,11 @@ export const AgenticIDE: React.FC = () => {
 
       // Lazy load syntax highlighter style only if needed
       if (config.syntaxHighlightingEnabled) {
-        import("react-syntax-highlighter/dist/esm/styles/prism").then((module) => {
-          setHighlighterStyle(module.vscDarkPlus);
-        });
+        import("react-syntax-highlighter/dist/esm/styles/prism").then(
+          (module) => {
+            setHighlighterStyle(module.vscDarkPlus);
+          },
+        );
       }
     });
   }, []);
@@ -69,7 +78,7 @@ export const AgenticIDE: React.FC = () => {
           });
         }
       }, perfConfig?.autoScrollThrottle || 100),
-    [perfConfig]
+    [perfConfig],
   );
 
   useEffect(() => {
@@ -201,11 +210,11 @@ export const AgenticIDE: React.FC = () => {
         }
         
         .heartbeat-pulse {
-          animation: ${perfConfig?.reduceAnimations ? 'none' : 'heartbeat 2s ease-in-out infinite'};
+          animation: ${perfConfig?.reduceAnimations ? "none" : "heartbeat 2s ease-in-out infinite"};
         }
         
         .spinner {
-          animation: ${perfConfig?.reduceAnimations ? 'spin 2s linear infinite' : 'spin 1s linear infinite'};
+          animation: ${perfConfig?.reduceAnimations ? "spin 2s linear infinite" : "spin 1s linear infinite"};
         }
         
         .copy-btn-glow {
@@ -453,8 +462,19 @@ export const AgenticIDE: React.FC = () => {
               style={{ fontFamily: "'Fira Code', monospace" }}
               disabled={state.isExecuting}
             />
-            <p className="mt-2 text-xs text-gray-400" style={{ fontFamily: "'Fira Code', monospace" }}>
-              Press <kbd className="px-1.5 py-0.5 bg-slate-700 rounded border border-slate-600 text-gray-300">Enter</kbd> to run, <kbd className="px-1.5 py-0.5 bg-slate-700 rounded border border-slate-600 text-gray-300">Ctrl + Enter</kbd> for new line
+            <p
+              className="mt-2 text-xs text-gray-400"
+              style={{ fontFamily: "'Fira Code', monospace" }}
+            >
+              Press{" "}
+              <kbd className="px-1.5 py-0.5 bg-slate-700 rounded border border-slate-600 text-gray-300">
+                Enter
+              </kbd>{" "}
+              to run,{" "}
+              <kbd className="px-1.5 py-0.5 bg-slate-700 rounded border border-slate-600 text-gray-300">
+                Ctrl + Enter
+              </kbd>{" "}
+              for new line
             </p>
             <button
               onClick={handleExecute}
