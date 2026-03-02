@@ -1,11 +1,11 @@
-import React, { useEffect, useRef } from 'react';
-import { Terminal as XTerm } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
-import '@xterm/xterm/css/xterm.css';
+import React, { useEffect, useRef } from "react";
+import { Terminal as XTerm } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import "@xterm/xterm/css/xterm.css";
 
 /**
  * Terminal Component
- * 
+ *
  * A real terminal emulator using xterm.js that displays output from
  * WebContainer processes in real-time.
  */
@@ -22,7 +22,7 @@ interface TerminalProps {
 export const Terminal: React.FC<TerminalProps> = ({
   processStream,
   clearTrigger,
-  height = '400px',
+  height = "400px",
 }) => {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
@@ -38,27 +38,27 @@ export const Terminal: React.FC<TerminalProps> = ({
       fontSize: 14,
       fontFamily: '"Fira Code", "Courier New", monospace',
       theme: {
-        background: '#0a0a0a',
-        foreground: '#ffffff',
-        cursor: '#ffffff',
-        cursorAccent: '#000000',
-        selectionBackground: '#4a4a4a',
-        black: '#000000',
-        red: '#e06c75',
-        green: '#98c379',
-        yellow: '#d19a66',
-        blue: '#61afef',
-        magenta: '#c678dd',
-        cyan: '#56b6c2',
-        white: '#abb2bf',
-        brightBlack: '#5c6370',
-        brightRed: '#e06c75',
-        brightGreen: '#98c379',
-        brightYellow: '#d19a66',
-        brightBlue: '#61afef',
-        brightMagenta: '#c678dd',
-        brightCyan: '#56b6c2',
-        brightWhite: '#ffffff',
+        background: "#0a0a0a",
+        foreground: "#ffffff",
+        cursor: "#ffffff",
+        cursorAccent: "#000000",
+        selectionBackground: "#4a4a4a",
+        black: "#000000",
+        red: "#e06c75",
+        green: "#98c379",
+        yellow: "#d19a66",
+        blue: "#61afef",
+        magenta: "#c678dd",
+        cyan: "#56b6c2",
+        white: "#abb2bf",
+        brightBlack: "#5c6370",
+        brightRed: "#e06c75",
+        brightGreen: "#98c379",
+        brightYellow: "#d19a66",
+        brightBlue: "#61afef",
+        brightMagenta: "#c678dd",
+        brightCyan: "#56b6c2",
+        brightWhite: "#ffffff",
       },
       allowTransparency: true,
       convertEol: true,
@@ -71,7 +71,7 @@ export const Terminal: React.FC<TerminalProps> = ({
 
     // Open terminal in DOM
     xterm.open(terminalRef.current);
-    
+
     // Fit to container
     fitAddon.fit();
 
@@ -80,20 +80,26 @@ export const Terminal: React.FC<TerminalProps> = ({
     fitAddonRef.current = fitAddon;
 
     // Welcome message
-    xterm.writeln('\x1b[1;32m================================================\x1b[0m');
-    xterm.writeln('\x1b[1;32m   SouthStack Terminal - Ready                \x1b[0m');
-    xterm.writeln('\x1b[1;32m================================================\x1b[0m');
-    xterm.writeln('');
+    xterm.writeln(
+      "\x1b[1;32m================================================\x1b[0m",
+    );
+    xterm.writeln(
+      "\x1b[1;32m   SouthStack Terminal - Ready                \x1b[0m",
+    );
+    xterm.writeln(
+      "\x1b[1;32m================================================\x1b[0m",
+    );
+    xterm.writeln("");
 
     // Handle window resize
     const handleResize = () => {
       fitAddon.fit();
     };
-    window.addEventListener('resize', handleResize);
+    window.addEventListener("resize", handleResize);
 
     // Cleanup
     return () => {
-      window.removeEventListener('resize', handleResize);
+      window.removeEventListener("resize", handleResize);
       xterm.dispose();
       xtermRef.current = null;
       fitAddonRef.current = null;
@@ -104,8 +110,8 @@ export const Terminal: React.FC<TerminalProps> = ({
   useEffect(() => {
     if (clearTrigger && xtermRef.current) {
       xtermRef.current.clear();
-      xtermRef.current.writeln('\x1b[1;33m[Terminal Cleared]\x1b[0m');
-      xtermRef.current.writeln('');
+      xtermRef.current.writeln("\x1b[1;33m[Terminal Cleared]\x1b[0m");
+      xtermRef.current.writeln("");
     }
   }, [clearTrigger]);
 
@@ -119,17 +125,18 @@ export const Terminal: React.FC<TerminalProps> = ({
 
     const readStream = async () => {
       if (!processStream) return;
-      
+
       isReading = true;
       reader = processStream.getReader();
 
       try {
+        // eslint-disable-next-line no-constant-condition
         while (true) {
           const { done, value } = await reader.read();
 
           if (done) {
-            xterm.writeln('');
-            xterm.writeln('\x1b[1;32m[Process Completed]\x1b[0m');
+            xterm.writeln("");
+            xterm.writeln("\x1b[1;32m[Process Completed]\x1b[0m");
             break;
           }
 
@@ -138,10 +145,17 @@ export const Terminal: React.FC<TerminalProps> = ({
             xterm.write(value);
           }
         }
-      } catch (error: any) {
-        if (error.name !== 'AbortError') {
-          xterm.writeln('');
-          xterm.writeln(`\x1b[1;31m[Stream Error: ${error.message}]\x1b[0m`);
+      } catch (error: unknown) {
+        if (
+          error &&
+          typeof error === "object" &&
+          "name" in error &&
+          error.name !== "AbortError"
+        ) {
+          xterm.writeln("");
+          const message =
+            "message" in error ? String(error.message) : "Unknown error";
+          xterm.writeln(`\x1b[1;31m[Stream Error: ${message}]\x1b[0m`);
         }
       } finally {
         reader?.releaseLock();
@@ -169,16 +183,19 @@ export const Terminal: React.FC<TerminalProps> = ({
           <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
           <div className="w-3 h-3 rounded-full bg-green-500"></div>
         </div>
-        <div className="text-sm text-gray-400 font-medium" style={{ fontFamily: "'Fira Code', monospace" }}>
+        <div
+          className="text-sm text-gray-400 font-medium"
+          style={{ fontFamily: "'Fira Code', monospace" }}
+        >
           Terminal
         </div>
         <div className="w-20"></div>
       </div>
-      
+
       {/* Terminal Content */}
       <div
         ref={terminalRef}
-        style={{ height, padding: '10px' }}
+        style={{ height, padding: "10px" }}
         className="terminal-wrapper bg-black"
       />
     </div>
@@ -188,15 +205,19 @@ export const Terminal: React.FC<TerminalProps> = ({
 /**
  * Helper: Write a log message to the terminal
  */
-export const writeToTerminal = (xterm: XTerm, message: string, type: 'info' | 'success' | 'error' | 'warning' = 'info') => {
+export const writeToTerminal = (
+  xterm: XTerm,
+  message: string,
+  type: "info" | "success" | "error" | "warning" = "info",
+) => {
   const colors = {
-    info: '\x1b[1;36m',    // Cyan
-    success: '\x1b[1;32m', // Green
-    error: '\x1b[1;31m',   // Red
-    warning: '\x1b[1;33m', // Yellow
+    info: "\x1b[1;36m", // Cyan
+    success: "\x1b[1;32m", // Green
+    error: "\x1b[1;31m", // Red
+    warning: "\x1b[1;33m", // Yellow
   };
 
-  const reset = '\x1b[0m';
+  const reset = "\x1b[0m";
   const color = colors[type];
 
   xterm.writeln(`${color}${message}${reset}`);

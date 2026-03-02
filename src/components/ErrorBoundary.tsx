@@ -1,5 +1,5 @@
-import { Component, ErrorInfo, ReactNode } from 'react';
-import { logger } from '../utils/logger';
+import { Component, ErrorInfo, ReactNode } from "react";
+import { logger } from "../utils/logger";
 
 interface Props {
   children: ReactNode;
@@ -26,8 +26,8 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   public componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    logger.error('React Error Boundary caught an error', error, {
-      component: 'ErrorBoundary',
+    logger.error("React Error Boundary caught an error", error, {
+      component: "ErrorBoundary",
       data: errorInfo,
     });
   }
