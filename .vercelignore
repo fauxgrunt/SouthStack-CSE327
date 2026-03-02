@@ -1,0 +1,22 @@
+# Dependencies
+
+node_modules
+
+# Documentation (not needed for deployment)
+
+\*.md
+!README.md
+
+# Development files
+
+.eslintrc.cjs
+.vscode
+.git
+
+# Build artifacts
+
+dist
+
+# Environment files
+
+.env\*
