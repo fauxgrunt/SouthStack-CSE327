@@ -5,6 +5,8 @@
  * used throughout the application.
  */
 
+import type * as webllm from "@mlc-ai/web-llm";
+
 // ============================================================================
 // CORE TYPES
 // ============================================================================
@@ -420,6 +422,7 @@ export interface UseAgenticLoopReturn {
   }>;
   cancelExecution: () => void;
   isReady: boolean;
+  engine: webllm.MLCEngine | null;
 }
 
 export interface UseTestAgentReturn {
@@ -499,3 +502,51 @@ export const DEFAULT_INFERENCE_OPTIONS: InferenceOptions = {
   presence_penalty: 0,
   frequency_penalty: 0,
 };
+
+// ============================================================================
+// P2P SWARM TYPES
+// ============================================================================
+
+export type SwarmMode = "master" | "worker" | "standalone";
+
+export type SwarmTaskType = "TASK_ASSIGN" | "TASK_COMPLETE" | "STATUS_UPDATE";
+
+export interface SwarmTaskPayload {
+  taskId: string;
+  fileName: string;
+  instructions: string;
+  type?: SwarmTaskType;
+  sharedContext?: string; // Shared project context for coordinated code generation
+}
+
+export interface TaskCompletePayload {
+  type: "TASK_COMPLETE";
+  taskId: string;
+  fileName: string;
+  code: string;
+  error?: string;
+}
+
+export interface TaskAssignment {
+  fileName: string;
+  instructions: string;
+}
+
+export interface SwarmTaskInfo {
+  taskId: string;
+  assignment: TaskAssignment;
+  nodeId: string;
+  status: "pending" | "completed" | "failed";
+  code?: string;
+  error?: string;
+  timestamp: number;
+}
+
+export interface SwarmProgress {
+  total: number;
+  completed: number;
+  pending: number;
+  failed: number;
+  timedOut: number;
+  percentage: number;
+}

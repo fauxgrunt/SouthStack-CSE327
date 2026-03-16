@@ -143,6 +143,47 @@ export const useAgenticLoop = () => {
     }
   }, [addLog]);
 
+  /**
+   * Request persistent storage so model/cache data is less likely to be evicted.
+   */
+  const requestPersistentStorage = useCallback(async (): Promise<void> => {
+    try {
+      if (!("storage" in navigator) || !("persist" in navigator.storage)) {
+        addLog(
+          "storage",
+          "Persistent storage API not available in this browser.",
+          "warning",
+        );
+        return;
+      }
+
+      if ("persisted" in navigator.storage) {
+        const isAlreadyPersistent = await navigator.storage.persisted();
+        if (isAlreadyPersistent) {
+          addLog("storage", "Persistent storage already granted.", "success");
+          return;
+        }
+      }
+
+      const granted = await navigator.storage.persist();
+      if (granted) {
+        addLog(
+          "storage",
+          "Persistent storage granted. Cached model data is now less likely to be evicted.",
+          "success",
+        );
+      } else {
+        addLog(
+          "storage",
+          "Persistent storage request was not granted. Cached model data may still be evicted under storage pressure.",
+          "warning",
+        );
+      }
+    } catch {
+      addLog("storage", "Could not request persistent storage.", "warning");
+    }
+  }, [addLog]);
+
   // Model change functionality removed - 0.5B is the only available model
 
   /**
@@ -159,6 +200,9 @@ export const useAgenticLoop = () => {
     );
 
     try {
+      // Ask for non-evictable storage quota before model download/caching.
+      await requestPersistentStorage();
+
       // Check storage availability (informational only)
       await checkStorageAvailability();
 
@@ -244,6 +288,7 @@ export const useAgenticLoop = () => {
   }, [
     addLog,
     checkStorageAvailability,
+    requestPersistentStorage,
     state.selectedModel,
     state.storageAvailable,
   ]);
@@ -439,6 +484,7 @@ export const useAgenticLoop = () => {
     executeAgenticLoop,
     cancelExecution,
     isReady: state.isInitialized && !state.isLoading,
+    engine: engineRef.current,
   };
 };
 

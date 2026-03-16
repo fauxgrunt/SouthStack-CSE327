@@ -5,11 +5,14 @@ import React, {
   useMemo,
   lazy,
   Suspense,
+  useCallback,
 } from "react";
 import { useAgenticLoop } from "../hooks/useAgenticLoop";
+import { useSwarmManager } from "../hooks/useSwarmManager";
 import { WindowControls } from "./WindowControls";
 import { LightweightCodeViewer } from "./LightweightCodeViewer";
 import { VirtualizedLogViewer } from "./VirtualizedLogViewer";
+import { SwarmControlPanel } from "./SwarmControlPanel";
 import {
   detectDeviceCapability,
   getPerformanceConfig,
@@ -35,13 +38,50 @@ export const AgenticIDE: React.FC = () => {
     executeAgenticLoop,
     cancelExecution,
     isReady,
+    engine,
   } = useAgenticLoop();
   const [userPrompt, setUserPrompt] = useState("");
   const [codeCopied, setCodeCopied] = useState(false);
   const [perfConfig, setPerfConfig] = useState<PerformanceConfig | null>(null);
   const [highlighterStyle, setHighlighterStyle] = useState<any>(null);
+  const [showSwarmPanel, setShowSwarmPanel] = useState(false);
+  const [completedFiles, setCompletedFiles] = useState<
+    { fileName: string; content: string }[]
+  >([]);
+  const [selectedCompletedFileName, setSelectedCompletedFileName] = useState<
+    string | null
+  >(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // File write handler for swarm (writes to console/logs)
+  const handleSwarmFileWrite = useCallback(
+    async (fileName: string, content: string) => {
+      console.log(`[Swarm] File write: ${fileName} (${content.length} bytes)`);
+
+      // Store completed files from master writes so they can be inspected in the UI.
+      setCompletedFiles((prev) => {
+        const existingIndex = prev.findIndex(
+          (file) => file.fileName === fileName,
+        );
+
+        if (existingIndex >= 0) {
+          const next = [...prev];
+          next[existingIndex] = { fileName, content };
+          return next;
+        }
+
+        return [...prev, { fileName, content }];
+      });
+
+      // Auto-select first completed file for immediate visibility.
+      setSelectedCompletedFileName((prev) => prev ?? fileName);
+    },
+    [],
+  );
+
+  // Initialize Swarm Manager with engine from useAgenticLoop
+  const swarmManager = useSwarmManager(engine, handleSwarmFileWrite);
 
   // Detect device capability and configure performance settings
   useEffect(() => {
@@ -188,6 +228,37 @@ export const AgenticIDE: React.FC = () => {
     }
     return "javascript";
   }, [state.generatedCode]);
+
+  const selectedCompletedFile = useMemo(() => {
+    if (completedFiles.length === 0) {
+      return null;
+    }
+
+    if (selectedCompletedFileName) {
+      const selected = completedFiles.find(
+        (file) => file.fileName === selectedCompletedFileName,
+      );
+      if (selected) {
+        return selected;
+      }
+    }
+
+    return completedFiles[0];
+  }, [completedFiles, selectedCompletedFileName]);
+
+  const detectFileLanguage = (fileName: string): string => {
+    const lowerName = fileName.toLowerCase();
+
+    if (lowerName.endsWith(".py")) return "python";
+    if (lowerName.endsWith(".ts")) return "typescript";
+    if (lowerName.endsWith(".tsx")) return "tsx";
+    if (lowerName.endsWith(".js")) return "javascript";
+    if (lowerName.endsWith(".jsx")) return "jsx";
+    if (lowerName.endsWith(".json")) return "json";
+    if (lowerName.endsWith(".md")) return "markdown";
+
+    return "text";
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-slate-900 to-gray-900 text-white p-8">
@@ -355,6 +426,17 @@ export const AgenticIDE: React.FC = () => {
               <div className="text-xs text-gray-400 px-2 py-1 bg-slate-800 rounded border border-slate-600">
                 Engine: Standard (0.5B)
               </div>
+              {/* Swarm Status Badge */}
+              {swarmManager.isInitialized && (
+                <div className="flex items-center gap-2 text-xs">
+                  <div
+                    className={`w-2 h-2 rounded-full ${swarmManager.activeConnectionCount > 0 ? "bg-green-500" : "bg-yellow-500"}`}
+                  />
+                  <span className="text-gray-300">
+                    P2P: {swarmManager.activeConnectionCount} nodes
+                  </span>
+                </div>
+              )}
               <div
                 className={`text-sm font-medium ${getPhaseColor()} flex items-center gap-2`}
               >
@@ -388,15 +470,44 @@ export const AgenticIDE: React.FC = () => {
                 </div>
               )}
             </div>
-            {state.isExecuting && (
+            <div className="flex items-center gap-2">
+              {/* Swarm Toggle Button */}
               <button
-                onClick={cancelExecution}
-                className="bg-red-600 hover:bg-red-700 px-4 py-2 rounded text-sm font-medium transition-colors"
+                onClick={() => setShowSwarmPanel(!showSwarmPanel)}
+                className="bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded text-sm font-medium transition-colors"
                 style={{ fontFamily: "'Fira Code', monospace" }}
               >
-                Cancel
+                {showSwarmPanel ? "Hide" : "Show"} P2P Swarm
               </button>
-            )}
+              {state.isExecuting && (
+                <button
+                  onClick={cancelExecution}
+                  className="bg-red-600 hover:bg-red-700 px-4 py-2 rounded text-sm font-medium transition-colors"
+                  style={{ fontFamily: "'Fira Code', monospace" }}
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* P2P Swarm Control Panel */}
+        {showSwarmPanel && swarmManager.isInitialized && (
+          <div className="mb-6">
+            <SwarmControlPanel
+              peerId={swarmManager.peerId}
+              connectionStatus={swarmManager.connectionStatus}
+              activeConnectionCount={swarmManager.activeConnectionCount}
+              swarmMode={swarmManager.swarmMode}
+              isProcessing={swarmManager.isProcessing}
+              currentTask={swarmManager.currentTask}
+              isInitialized={swarmManager.isInitialized}
+              connectToNode={swarmManager.connectToNode}
+              disconnectAll={swarmManager.disconnectAll}
+              distributeTask={swarmManager.distributeTask}
+              getProgress={swarmManager.getProgress}
+            />
           </div>
         )}
 
@@ -513,6 +624,108 @@ export const AgenticIDE: React.FC = () => {
                   language={detectedLanguage}
                 />
               )}
+            </div>
+          </div>
+        )}
+
+        {/* Swarm Completed Files Viewer */}
+        {completedFiles.length > 0 && (
+          <div className="bg-slate-900/50 backdrop-blur-md rounded-lg mb-6 border border-slate-700 shadow-xl overflow-hidden">
+            <div className="bg-slate-800/80 px-4 py-3 border-b border-slate-700 flex items-center justify-between">
+              <div
+                className="text-sm text-gray-300 font-medium"
+                style={{ fontFamily: "'Fira Code', monospace" }}
+              >
+                Swarm Completed Files
+              </div>
+              <div
+                className="text-xs text-gray-400"
+                style={{ fontFamily: "'Fira Code', monospace" }}
+              >
+                {completedFiles.length} file
+                {completedFiles.length > 1 ? "s" : ""}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-[260px_1fr] min-h-[320px]">
+              <div className="border-r border-slate-700 bg-slate-950/50 p-3">
+                <div
+                  className="text-xs text-gray-400 mb-2"
+                  style={{ fontFamily: "'Fira Code', monospace" }}
+                >
+                  Output Files
+                </div>
+                <div className="space-y-2 max-h-[300px] overflow-y-auto">
+                  {completedFiles.map((file) => {
+                    const isSelected =
+                      selectedCompletedFile?.fileName === file.fileName;
+
+                    return (
+                      <button
+                        key={file.fileName}
+                        onClick={() =>
+                          setSelectedCompletedFileName(file.fileName)
+                        }
+                        className={`w-full text-left px-3 py-2 rounded border transition-colors ${
+                          isSelected
+                            ? "bg-blue-600/20 border-blue-500 text-blue-200"
+                            : "bg-slate-900/80 border-slate-700 text-gray-300 hover:bg-slate-800"
+                        }`}
+                        style={{ fontFamily: "'Fira Code', monospace" }}
+                      >
+                        <div className="text-xs font-semibold truncate">
+                          {file.fileName}
+                        </div>
+                        <div className="text-[11px] opacity-70 mt-1">
+                          {file.content.length} bytes
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="overflow-x-auto code-container">
+                {selectedCompletedFile &&
+                  (perfConfig?.syntaxHighlightingEnabled && highlighterStyle ? (
+                    <Suspense
+                      fallback={
+                        <div className="p-6 text-gray-400 font-mono text-sm">
+                          Loading syntax highlighter...
+                        </div>
+                      }
+                    >
+                      <SyntaxHighlighter
+                        language={detectFileLanguage(
+                          selectedCompletedFile.fileName,
+                        )}
+                        style={highlighterStyle}
+                        customStyle={{
+                          margin: 0,
+                          padding: "1.5rem",
+                          background: "transparent",
+                          fontSize: "0.875rem",
+                          fontFamily: "'Fira Code', monospace",
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-all",
+                          minHeight: "320px",
+                        }}
+                        showLineNumbers={true}
+                        wrapLines={true}
+                        lineNumberStyle={{ marginRight: "1rem", opacity: 0.5 }}
+                      >
+                        {selectedCompletedFile.content}
+                      </SyntaxHighlighter>
+                    </Suspense>
+                  ) : (
+                    <LightweightCodeViewer
+                      code={selectedCompletedFile.content}
+                      language={detectFileLanguage(
+                        selectedCompletedFile.fileName,
+                      )}
+                    />
+                  ))}
+              </div>
             </div>
           </div>
         )}
