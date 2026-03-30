@@ -8,12 +8,31 @@ export interface SwarmTaskPayload {
   taskId: string;
   fileName: string;
   instructions: string;
-  type?: "TASK_ASSIGN" | "TASK_COMPLETE" | "STATUS_UPDATE";
+  type?:
+    | "TASK_ASSIGN"
+    | "TASK_COMPLETE"
+    | "STATUS_UPDATE"
+    | "DEBUG_ANALYSIS"
+    | "DEBUG_REQUEST_NEXT"
+    | "DEBUG_ANALYSIS_RESULT";
   sharedContext?: string; // Shared project context for coordinated code generation
+  codeChunk?: string;
+  chunkIndex?: number;
+  sessionId?: string;
 }
 
 type SwarmMessageEnvelope = {
-  type: "TASK_DISPATCH" | "TASK_ASSIGN" | "TASK_COMPLETE" | "STATUS_UPDATE";
+  type:
+    | "TASK_DISPATCH"
+    | "TASK_ASSIGN"
+    | "TASK_COMPLETE"
+    | "STATUS_UPDATE"
+    | "PING"
+    | "PONG"
+    | "DEBUG_ANALYSIS"
+    | "DEBUG_REQUEST_NEXT"
+    | "DEBUG_ANALYSIS_RESULT"
+    | "SWARM_STATE_SYNC";
   payload?: unknown;
   timestamp?: number;
 };
@@ -41,12 +60,17 @@ export const useSwarm = () => {
   const [isInitialized, setIsInitialized] = useState<boolean>(false);
   const [connectionStatus, setConnectionStatus] =
     useState<string>("disconnected");
+  const [isMasterHeartbeatHealthy, setIsMasterHeartbeatHealthy] =
+    useState<boolean>(true);
 
   const peerRef = useRef<Peer | null>(null);
   const dataHandlerRef = useRef<
     ((data: unknown, conn: DataConnection) => void) | null
   >(null);
   const registeredConnectionHandlersRef = useRef(new WeakSet<DataConnection>());
+  const onMasterLostRef = useRef<(() => void) | null>(null);
+  const lastPingRef = useRef<number>(Date.now());
+  const masterLostNotifiedRef = useRef(false);
 
   const normalizeIncomingData = useCallback((rawData: unknown) => {
     console.log("[WEBRTC WORKER] Received data:", rawData);
@@ -64,7 +88,10 @@ export const useSwarm = () => {
           "payload" in parsed
         ) {
           const dispatch = parsed as SwarmMessageEnvelope;
-          console.log("[WEBRTC WORKER] TASK_DISPATCH envelope unpacked:", dispatch);
+          console.log(
+            "[WEBRTC WORKER] TASK_DISPATCH envelope unpacked:",
+            dispatch,
+          );
           return dispatch.payload;
         }
 
@@ -181,6 +208,32 @@ export const useSwarm = () => {
       conn.on("data", (rawData) => {
         console.log("[WEBRTC WORKER] Received data:", rawData);
         const data = normalizeIncomingData(rawData);
+
+        if (typeof data === "object" && data !== null && "type" in data) {
+          const message = data as { type: string; timestamp?: number };
+
+          if (message.type === "PING") {
+            lastPingRef.current = Date.now();
+            masterLostNotifiedRef.current = false;
+            setIsMasterHeartbeatHealthy(true);
+
+            if (conn.open) {
+              conn.send(
+                JSON.stringify({
+                  type: "PONG",
+                  timestamp: Date.now(),
+                }),
+              );
+            }
+
+            return;
+          }
+
+          if (message.type === "PONG") {
+            return;
+          }
+        }
+
         console.log("[Swarm] Data received from", conn.peer, ":", data);
 
         // Call custom data handler if registered
@@ -200,6 +253,72 @@ export const useSwarm = () => {
     },
     [normalizeIncomingData],
   );
+
+  useEffect(() => {
+    if (!isMaster) {
+      return;
+    }
+
+    const interval = setInterval(() => {
+      const ping = JSON.stringify({
+        type: "PING",
+        timestamp: Date.now(),
+      });
+
+      connections.forEach((conn) => {
+        if (!conn.open) {
+          return;
+        }
+
+        try {
+          conn.send(ping);
+        } catch (error) {
+          console.warn("[Swarm:Heartbeat] Failed to send PING", {
+            peer: conn.peer,
+            error,
+          });
+        }
+      });
+    }, 5000);
+
+    return () => {
+      clearInterval(interval);
+    };
+  }, [connections, isMaster]);
+
+  useEffect(() => {
+    if (isMaster || connections.length === 0) {
+      return;
+    }
+
+    const monitor = setInterval(() => {
+      const elapsed = Date.now() - lastPingRef.current;
+
+      if (elapsed <= 15000 || masterLostNotifiedRef.current) {
+        return;
+      }
+
+      masterLostNotifiedRef.current = true;
+      setIsMasterHeartbeatHealthy(false);
+      console.warn("[Swarm:Heartbeat] Master heartbeat timeout", {
+        elapsedMs: elapsed,
+      });
+
+      if (onMasterLostRef.current) {
+        onMasterLostRef.current();
+      }
+    }, 1000);
+
+    return () => {
+      clearInterval(monitor);
+    };
+  }, [connections.length, isMaster]);
+
+  useEffect(() => {
+    if (isMaster) {
+      setIsMasterHeartbeatHealthy(true);
+    }
+  }, [isMaster]);
 
   /**
    * Connect to a target node (Master Node function)
@@ -363,6 +482,18 @@ export const useSwarm = () => {
     [],
   );
 
+  const onMasterLost = useCallback((handler: () => void) => {
+    onMasterLostRef.current = handler;
+  }, []);
+
+  const promoteToMaster = useCallback(() => {
+    setIsMaster(true);
+    setConnectionStatus("connected");
+    setIsMasterHeartbeatHealthy(true);
+    masterLostNotifiedRef.current = false;
+    console.log("[Swarm] Promoted current node to master mode");
+  }, []);
+
   /**
    * Disconnect from a specific node
    */
@@ -395,6 +526,7 @@ export const useSwarm = () => {
     isMaster,
     isInitialized,
     connectionStatus,
+    isMasterHeartbeatHealthy,
     activeConnectionCount: connections.filter((c) => c.open).length,
 
     // Actions
@@ -402,6 +534,8 @@ export const useSwarm = () => {
     broadcastTask,
     sendTaskToNode,
     onData,
+    onMasterLost,
+    promoteToMaster,
     disconnectFromNode,
     disconnectAll,
   };

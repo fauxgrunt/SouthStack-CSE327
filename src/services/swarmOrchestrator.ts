@@ -3,6 +3,73 @@ import * as webllm from "@mlc-ai/web-llm";
 import type { DataConnection } from "peerjs";
 import type { SwarmTaskPayload } from "../hooks/useSwarm";
 
+export interface DebugSourceFile {
+  fileName: string;
+  content: string | Iterable<string> | AsyncIterable<string>;
+}
+
+export interface DebugChunkBuildOptions {
+  chunkSize?: number;
+  sessionId?: string;
+}
+
+const DEBUG_ANALYSIS_PROMPT = `You are a senior performance and reliability engineer.
+Analyze the provided code chunk and output concise findings with:
+1) BUGS: concrete correctness issues
+2) BOTTLENECKS: performance or scalability concerns
+3) RISKS: reliability/security/maintainability risks
+4) ACTIONS: prioritized fixes with short rationale
+
+Respond in plain text with clear headings.`;
+
+function isAsyncIterable(value: unknown): value is AsyncIterable<string> {
+  return (
+    typeof value === "object" && value !== null && Symbol.asyncIterator in value
+  );
+}
+
+function isIterable(value: unknown): value is Iterable<string> {
+  return (
+    typeof value === "object" && value !== null && Symbol.iterator in value
+  );
+}
+
+async function* streamTextChunks(
+  content: string | Iterable<string> | AsyncIterable<string>,
+  chunkSize: number,
+): AsyncGenerator<string> {
+  if (typeof content === "string") {
+    for (let i = 0; i < content.length; i += chunkSize) {
+      yield content.slice(i, i + chunkSize);
+    }
+    return;
+  }
+
+  let buffer = "";
+
+  if (isAsyncIterable(content)) {
+    for await (const piece of content) {
+      buffer += piece;
+      while (buffer.length >= chunkSize) {
+        yield buffer.slice(0, chunkSize);
+        buffer = buffer.slice(chunkSize);
+      }
+    }
+  } else if (isIterable(content)) {
+    for (const piece of content) {
+      buffer += piece;
+      while (buffer.length >= chunkSize) {
+        yield buffer.slice(0, chunkSize);
+        buffer = buffer.slice(chunkSize);
+      }
+    }
+  }
+
+  if (buffer.length > 0) {
+    yield buffer;
+  }
+}
+
 /**
  * Fault-Tolerant JSON Extraction
  *
@@ -207,6 +274,53 @@ export interface TaskAssignment {
   instructions: string;
 }
 
+export async function createDebugAnalysisPayloads(
+  files: DebugSourceFile[],
+  options: DebugChunkBuildOptions = {},
+): Promise<SwarmTaskPayload[]> {
+  const payloads: SwarmTaskPayload[] = [];
+
+  for await (const payload of createDebugAnalysisPayloadStream(
+    files,
+    options,
+  )) {
+    payloads.push(payload);
+  }
+
+  return payloads;
+}
+
+export async function* createDebugAnalysisPayloadStream(
+  files: DebugSourceFile[],
+  options: DebugChunkBuildOptions = {},
+): AsyncGenerator<SwarmTaskPayload> {
+  const chunkSize = options.chunkSize ?? 12_000;
+  const sessionId = options.sessionId ?? `debug_session_${Date.now()}`;
+  let payloadIndex = 0;
+
+  for (const file of files) {
+    let chunkIndex = 0;
+
+    for await (const chunk of streamTextChunks(file.content, chunkSize)) {
+      const taskId = `debug_${Date.now()}_${payloadIndex}`;
+      const payload: SwarmTaskPayload = {
+        type: "DEBUG_ANALYSIS",
+        taskId,
+        fileName: file.fileName,
+        instructions:
+          "Analyze this chunk for bugs, bottlenecks, and reliability risks.",
+        codeChunk: chunk,
+        chunkIndex,
+        sessionId,
+      };
+
+      yield payload;
+      payloadIndex += 1;
+      chunkIndex += 1;
+    }
+  }
+}
+
 /**
  * Orchestrate Swarm - Break down user prompt into tasks and distribute
  *
@@ -247,7 +361,10 @@ export async function orchestrateSwarm(
     });
 
     response = completion.choices[0]?.message?.content || "";
-    console.log("[Orchestrator] AI Response received:", response.substring(0, 200) + "...");
+    console.log(
+      "[Orchestrator] AI Response received:",
+      response.substring(0, 200) + "...",
+    );
   } catch (error) {
     console.error("[Orchestrator] Failed to get AI decomposition:", error);
     throw new Error("Failed to decompose task with AI");
@@ -345,9 +462,11 @@ export async function executeWorkerTask(
   ];
 
   try {
-    console.log(`[Worker] Starting LLM generation for ${taskPayload.fileName}...`);
+    console.log(
+      `[Worker] Starting LLM generation for ${taskPayload.fileName}...`,
+    );
     const startTime = Date.now();
-    
+
     const completion = await engine.chat.completions.create({
       messages,
       temperature: 0.3, // Lower temperature for more consistent code generation
@@ -376,6 +495,56 @@ export async function executeWorkerTask(
     throw error;
   }
 }
+
+export async function executeDebugAnalysisTask(
+  taskPayload: SwarmTaskPayload,
+  engine: webllm.MLCEngine,
+): Promise<string> {
+  const chunk = taskPayload.codeChunk ?? "";
+  const chunkSize = chunk.length;
+
+  console.log("[DebugWorker] Starting analysis", {
+    taskId: taskPayload.taskId,
+    fileName: taskPayload.fileName,
+    chunkIndex: taskPayload.chunkIndex,
+    chunkSize,
+  });
+
+  const messages = [
+    {
+      role: "system" as const,
+      content: DEBUG_ANALYSIS_PROMPT,
+    },
+    {
+      role: "user" as const,
+      content: [
+        `Session: ${taskPayload.sessionId ?? "unknown"}`,
+        `File: ${taskPayload.fileName}`,
+        `Chunk Index: ${taskPayload.chunkIndex ?? 0}`,
+        "Code Chunk:",
+        chunk,
+      ].join("\n\n"),
+    },
+  ];
+
+  const completion = await engine.chat.completions.create({
+    messages,
+    temperature: 0.1,
+    max_tokens: 600,
+  });
+
+  return completion.choices[0]?.message?.content?.trim() || "No findings.";
+}
+
+export type SwarmTaskSnapshot = Array<{
+  taskId: string;
+  assignment: TaskAssignment;
+  nodeId: string;
+  status: "pending" | "completed" | "failed" | "timeout";
+  code?: string;
+  error?: string;
+  timestamp: number;
+}>;
 
 /**
  * Create a completion tracker for managing distributed task results
@@ -482,6 +651,24 @@ export class SwarmTaskTracker {
     return this.getAllTasks().filter((t) => t.status === "pending");
   }
 
+  getPendingTasksForNode(nodeId: string) {
+    return this.getPendingTasks().filter((t) => t.nodeId === nodeId);
+  }
+
+  reassignTask(taskId: string, nextNodeId: string) {
+    const task = this.tasks.get(taskId);
+    if (!task) {
+      return false;
+    }
+
+    this.clearTimeout(taskId);
+    task.nodeId = nextNodeId;
+    task.status = "pending";
+    task.error = undefined;
+    task.timestamp = Date.now();
+    return true;
+  }
+
   getCompletedTasks() {
     return this.getAllTasks().filter((t) => t.status === "completed");
   }
@@ -510,6 +697,33 @@ export class SwarmTaskTracker {
       timedOut: all.filter((t) => t.status === "timeout").length,
       percentage: all.length > 0 ? (completed / all.length) * 100 : 0,
     };
+  }
+
+  toSnapshot(): SwarmTaskSnapshot {
+    return this.getAllTasks().map((task) => ({
+      taskId: task.taskId,
+      assignment: task.assignment,
+      nodeId: task.nodeId,
+      status: task.status,
+      code: task.code,
+      error: task.error,
+      timestamp: task.timestamp,
+    }));
+  }
+
+  restoreFromSnapshot(snapshot: SwarmTaskSnapshot) {
+    this.clear();
+
+    snapshot.forEach((task) => {
+      this.tasks.set(task.taskId, {
+        assignment: task.assignment,
+        nodeId: task.nodeId,
+        status: task.status,
+        code: task.code,
+        error: task.error,
+        timestamp: task.timestamp,
+      });
+    });
   }
 
   clear() {

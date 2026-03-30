@@ -506,7 +506,10 @@ export const AgenticIDE: React.FC = () => {
               connectToNode={swarmManager.connectToNode}
               disconnectAll={swarmManager.disconnectAll}
               distributeTask={swarmManager.distributeTask}
+              distributeDebugAnalysis={swarmManager.distributeDebugAnalysis}
               getProgress={swarmManager.getProgress}
+              getAllTasks={swarmManager.getAllTasks}
+              isMasterHeartbeatHealthy={swarmManager.isMasterHeartbeatHealthy}
             />
           </div>
         )}
