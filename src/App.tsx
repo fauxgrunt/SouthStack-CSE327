@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useCallback, useState, useEffect, useRef } from "react";
 import * as webllm from "@mlc-ai/web-llm";
 import { webContainerService } from "./services/webcontainer";
 import { Terminal } from "./components/Terminal";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { logger } from "./utils/logger";
+import { useVoiceInput } from "./hooks/useVoiceInput";
 
 /**
  * SouthStack - Real Agentic Loop Implementation
@@ -46,6 +47,18 @@ const App: React.FC = () => {
   const engineRef = useRef<webllm.MLCEngine | null>(null);
   const isInitializedRef = useRef(false);
   const logsEndRef = useRef<HTMLDivElement>(null);
+
+  const appendPromptTranscript = useCallback((transcript: string) => {
+    setUserPrompt((prev) => {
+      if (prev.trim().length === 0) {
+        return transcript;
+      }
+
+      return `${prev}${/\s$/.test(prev) ? "" : " "}${transcript}`;
+    });
+  }, []);
+
+  const promptVoice = useVoiceInput(appendPromptTranscript);
 
   // Monitor online/offline status
   useEffect(() => {
@@ -176,6 +189,8 @@ const App: React.FC = () => {
       addLog("Please enter a prompt", "warning");
       return;
     }
+
+    promptVoice.stopListening();
 
     try {
       // Phase 1: Generate Code
@@ -674,12 +689,27 @@ const express = require('express');  // WRONG - express not available offline!`;
             {/* Prompt Input */}
             {phase === "ready" && (
               <div className="bg-slate-900/50 backdrop-blur-md rounded-lg p-6 border border-slate-700 shadow-xl">
-                <h2
-                  className="text-xl font-semibold mb-4"
-                  style={{ fontFamily: "'JetBrains Mono', monospace" }}
-                >
-                  Agentic Prompt
-                </h2>
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <h2
+                    className="text-xl font-semibold"
+                    style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                  >
+                    Agentic Prompt
+                  </h2>
+                  <button
+                    type="button"
+                    onClick={
+                      promptVoice.isListening
+                        ? promptVoice.stopListening
+                        : promptVoice.startListening
+                    }
+                    disabled={!promptVoice.isSupported || phase !== "ready"}
+                    className="px-3 py-1.5 rounded-md text-xs font-semibold border border-slate-600 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                    style={{ fontFamily: "'Fira Code', monospace" }}
+                  >
+                    {promptVoice.isListening ? "Stop Mic" : "Start Mic"}
+                  </button>
+                </div>
                 <textarea
                   value={userPrompt}
                   onChange={(e) => setUserPrompt(e.target.value)}
@@ -692,6 +722,22 @@ const express = require('express');  // WRONG - express not available offline!`;
                   style={{ fontFamily: "'Fira Code', monospace" }}
                   disabled={phase !== "ready"}
                 />
+                {!promptVoice.isSupported && (
+                  <p
+                    className="mt-2 text-xs text-amber-300"
+                    style={{ fontFamily: "'Fira Code', monospace" }}
+                  >
+                    Voice input is not supported in this browser.
+                  </p>
+                )}
+                {promptVoice.error && (
+                  <p
+                    className="mt-2 text-xs text-red-300"
+                    style={{ fontFamily: "'Fira Code', monospace" }}
+                  >
+                    {promptVoice.error}
+                  </p>
+                )}
                 <button
                   onClick={executeAgenticLoop}
                   disabled={phase !== "ready" || !userPrompt.trim()}

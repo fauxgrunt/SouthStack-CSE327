@@ -1,6 +1,13 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { DataConnection } from "peerjs";
 import type { SwarmMode } from "../hooks/useSwarmManager";
+import { useVoiceInput } from "../hooks/useVoiceInput";
 
 type WorkflowMode = "codegen" | "debug";
 type DeviceProfile = "low" | "high";
@@ -129,6 +136,18 @@ export const SwarmControlPanel: React.FC<SwarmControlPanelProps> = ({
   const [peerIdCopied, setPeerIdCopied] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const directoryInputRef = useRef<HTMLInputElement | null>(null);
+
+  const appendTaskPromptTranscript = useCallback((transcript: string) => {
+    setTaskPrompt((prev) => {
+      if (prev.trim().length === 0) {
+        return transcript;
+      }
+
+      return `${prev}${/\s$/.test(prev) ? "" : " "}${transcript}`;
+    });
+  }, []);
+
+  const taskPromptVoice = useVoiceInput(appendTaskPromptTranscript);
 
   const hasConnectedWorkers = activeConnectionCount > 0;
   const isTaskPromptEmpty = taskPrompt.trim().length === 0;
@@ -349,6 +368,8 @@ export const SwarmControlPanel: React.FC<SwarmControlPanelProps> = ({
   };
 
   const handleDistribute = async () => {
+    taskPromptVoice.stopListening();
+
     console.log("[SwarmUI] Distribute button clicked", {
       promptLength: taskPrompt.trim().length,
       mode: swarmMode,
@@ -638,23 +659,51 @@ export const SwarmControlPanel: React.FC<SwarmControlPanelProps> = ({
               </label>
 
               {workflowMode === "codegen" ? (
-                <textarea
-                  value={taskPrompt}
-                  onChange={(e) => setTaskPrompt(e.target.value)}
-                  onKeyDown={handleTaskPromptKeyDown}
-                  placeholder={
-                    hasConnectedWorkers
-                      ? "Describe the feature, file outputs, and constraints..."
-                      : "Connect at least one worker node to distribute a task"
-                  }
-                  className={`w-full px-3 py-2.5 bg-gray-900 border rounded-md text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-2 transition-colors mb-2 resize-y min-h-[92px] ${
-                    isTaskInputDisabled
-                      ? "border-gray-700 opacity-60 cursor-not-allowed"
-                      : "border-gray-600 focus:border-blue-500 focus:ring-blue-500/30"
-                  }`}
-                  rows={4}
-                  disabled={isTaskInputDisabled}
-                />
+                <>
+                  <div className="mb-2 flex items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={
+                        taskPromptVoice.isListening
+                          ? taskPromptVoice.stopListening
+                          : taskPromptVoice.startListening
+                      }
+                      disabled={
+                        !taskPromptVoice.isSupported || isTaskInputDisabled
+                      }
+                      className="px-2.5 py-1 rounded text-[11px] border border-gray-600 bg-gray-900 text-white hover:border-blue-400 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {taskPromptVoice.isListening ? "Stop Mic" : "Start Mic"}
+                    </button>
+                  </div>
+                  <textarea
+                    value={taskPrompt}
+                    onChange={(e) => setTaskPrompt(e.target.value)}
+                    onKeyDown={handleTaskPromptKeyDown}
+                    placeholder={
+                      hasConnectedWorkers
+                        ? "Describe the feature, file outputs, and constraints..."
+                        : "Connect at least one worker node to distribute a task"
+                    }
+                    className={`w-full px-3 py-2.5 bg-gray-900 border rounded-md text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-2 transition-colors mb-2 resize-y min-h-[92px] ${
+                      isTaskInputDisabled
+                        ? "border-gray-700 opacity-60 cursor-not-allowed"
+                        : "border-gray-600 focus:border-blue-500 focus:ring-blue-500/30"
+                    }`}
+                    rows={4}
+                    disabled={isTaskInputDisabled}
+                  />
+                  {!taskPromptVoice.isSupported && (
+                    <p className="text-[11px] text-amber-300 mb-2">
+                      Voice input is not supported in this browser.
+                    </p>
+                  )}
+                  {taskPromptVoice.error && (
+                    <p className="text-[11px] text-red-300 mb-2">
+                      {taskPromptVoice.error}
+                    </p>
+                  )}
+                </>
               ) : (
                 <div className="space-y-2 mb-2">
                   <div className="bg-gray-900/80 border border-gray-700 rounded p-2 space-y-2">

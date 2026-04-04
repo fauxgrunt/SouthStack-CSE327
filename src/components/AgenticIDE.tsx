@@ -9,6 +9,7 @@ import React, {
 } from "react";
 import { useAgenticLoop } from "../hooks/useAgenticLoop";
 import { useSwarmManager } from "../hooks/useSwarmManager";
+import { useVoiceInput } from "../hooks/useVoiceInput";
 import { WindowControls } from "./WindowControls";
 import { LightweightCodeViewer } from "./LightweightCodeViewer";
 import { VirtualizedLogViewer } from "./VirtualizedLogViewer";
@@ -83,6 +84,18 @@ export const AgenticIDE: React.FC = () => {
   // Initialize Swarm Manager with engine from useAgenticLoop
   const swarmManager = useSwarmManager(engine, handleSwarmFileWrite);
 
+  const appendPromptTranscript = useCallback((transcript: string) => {
+    setUserPrompt((prev) => {
+      if (prev.trim().length === 0) {
+        return transcript;
+      }
+
+      return `${prev}${/\s$/.test(prev) ? "" : " "}${transcript}`;
+    });
+  }, []);
+
+  const promptVoice = useVoiceInput(appendPromptTranscript);
+
   // Detect device capability and configure performance settings
   useEffect(() => {
     detectDeviceCapability().then((capability) => {
@@ -134,6 +147,8 @@ export const AgenticIDE: React.FC = () => {
 
   const handleExecute = async () => {
     if (!userPrompt.trim()) return;
+
+    promptVoice.stopListening();
 
     // Blur the textarea to prevent duplicate submissions
     textareaRef.current?.blur();
@@ -517,12 +532,27 @@ export const AgenticIDE: React.FC = () => {
         {/* Prompt Input */}
         {isReady && (
           <div className="bg-slate-900/50 backdrop-blur-md rounded-lg p-6 mb-6 border border-slate-700 shadow-xl">
-            <h2
-              className="text-xl font-semibold mb-4"
-              style={{ fontFamily: "'JetBrains Mono', monospace" }}
-            >
-              Agentic Prompt
-            </h2>
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <h2
+                className="text-xl font-semibold"
+                style={{ fontFamily: "'JetBrains Mono', monospace" }}
+              >
+                Agentic Prompt
+              </h2>
+              <button
+                type="button"
+                onClick={
+                  promptVoice.isListening
+                    ? promptVoice.stopListening
+                    : promptVoice.startListening
+                }
+                disabled={!promptVoice.isSupported || state.isExecuting}
+                className="px-3 py-1.5 rounded-md text-xs font-semibold border border-slate-600 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                style={{ fontFamily: "'Fira Code', monospace" }}
+              >
+                {promptVoice.isListening ? "Stop Mic" : "Start Mic"}
+              </button>
+            </div>
             <textarea
               ref={textareaRef}
               value={userPrompt}
@@ -533,6 +563,22 @@ export const AgenticIDE: React.FC = () => {
               style={{ fontFamily: "'Fira Code', monospace" }}
               disabled={state.isExecuting}
             />
+            {!promptVoice.isSupported && (
+              <p
+                className="mt-2 text-xs text-amber-300"
+                style={{ fontFamily: "'Fira Code', monospace" }}
+              >
+                Voice input is not supported in this browser.
+              </p>
+            )}
+            {promptVoice.error && (
+              <p
+                className="mt-2 text-xs text-red-300"
+                style={{ fontFamily: "'Fira Code', monospace" }}
+              >
+                {promptVoice.error}
+              </p>
+            )}
             <p
               className="mt-2 text-xs text-gray-400"
               style={{ fontFamily: "'Fira Code', monospace" }}
