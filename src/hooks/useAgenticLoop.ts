@@ -76,6 +76,20 @@ interface InferenceProfile {
 }
 
 const WEBLLM_CONTEXT_SAFETY_MARGIN = 128;
+let sharedEngineInstance: webllm.MLCEngine | null = null;
+let sharedEngineInitPromise: Promise<webllm.MLCEngine> | null = null;
+
+function clearSharedEngineCache() {
+  sharedEngineInstance = null;
+  sharedEngineInitPromise = null;
+}
+
+function isDisposedEngineError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /disposed|already been disposed|engine has been disposed/i.test(
+    message,
+  );
+}
 
 /**
  * useAgenticLoop - Core hook for autonomous AI coding with self-healing
@@ -112,6 +126,32 @@ export const useAgenticLoop = () => {
     buildInferenceProfile("medium", true),
   );
   const liteModeRef = useRef(false);
+  const isGeneratingRef = useRef(false);
+
+  const getSharedEngine = useCallback(async () => {
+    if (sharedEngineInstance) {
+      return sharedEngineInstance;
+    }
+
+    if (sharedEngineInitPromise) {
+      return sharedEngineInitPromise;
+    }
+
+    sharedEngineInitPromise = Promise.resolve().then(() => {
+      sharedEngineInstance = new webllm.MLCEngine();
+      return sharedEngineInstance;
+    });
+
+    try {
+      return await sharedEngineInitPromise;
+    } catch (error) {
+      sharedEngineInitPromise = null;
+      sharedEngineInstance = null;
+      throw error;
+    } finally {
+      sharedEngineInitPromise = null;
+    }
+  }, []);
 
   // Logging utility with automatic size limiting for memory management
   const addLog = useCallback(
@@ -288,7 +328,7 @@ export const useAgenticLoop = () => {
         "info",
       );
 
-      const engine = new webllm.MLCEngine();
+      const engine = await getSharedEngine();
       engineRef.current = engine;
 
       // Progress tracking for model download
@@ -360,16 +400,30 @@ export const useAgenticLoop = () => {
         currentPhase: "error",
       }));
 
-      // Cleanup on failure
+      // Reset the hook-local reference on failure; keep the shared singleton available
+      // only if it was successfully initialized.
       engineRef.current = null;
     }
-  }, [addLog, checkStorageAvailability, requestPersistentStorage]);
+  }, [
+    addLog,
+    checkStorageAvailability,
+    getSharedEngine,
+    requestPersistentStorage,
+  ]);
 
   /**
    * Main Agentic Loop - Autonomous code generation with self-healing
    */
   const executeAgenticLoop = useCallback(
     async (userPrompt: string, ragContext?: string[]) => {
+      if (isGeneratingRef.current) {
+        const busyMessage = "Please wait for the current task to finish.";
+        addLog("execution", busyMessage, "warning");
+        return { success: false, error: busyMessage };
+      }
+
+      isGeneratingRef.current = true;
+
       const profile = inferenceProfileRef.current;
 
       // Create abort controller for this execution
@@ -389,6 +443,17 @@ export const useAgenticLoop = () => {
       let currentCode: string | null = null;
 
       try {
+        if (
+          engineRef.current !== sharedEngineInstance &&
+          sharedEngineInstance
+        ) {
+          engineRef.current = sharedEngineInstance;
+        }
+
+        if (!engineRef.current) {
+          throw new Error("WebLLM engine is not initialized.");
+        }
+
         while (attempt < profile.retryAttempts) {
           if (abortControllerRef.current?.signal.aborted) {
             addLog("execution", "Execution cancelled by user", "warning");
@@ -572,6 +637,24 @@ export const useAgenticLoop = () => {
           "Failed to generate working code after all retry attempts",
         );
       } catch (error: any) {
+        if (isDisposedEngineError(error)) {
+          clearSharedEngineCache();
+          engineRef.current = null;
+
+          const disposedMessage =
+            "The WebLLM engine was disposed while generating. Please reinitialize the engine and try again.";
+          addLog("execution", disposedMessage, "error");
+
+          setState((prev) => ({
+            ...prev,
+            isExecuting: false,
+            currentPhase: "error",
+            error: disposedMessage,
+          }));
+
+          return { success: false, error: disposedMessage };
+        }
+
         const errorMsg = error.message || "Unknown error in agentic loop";
         addLog("execution", `FATAL ERROR: ${errorMsg}`, "error");
 
@@ -583,6 +666,8 @@ export const useAgenticLoop = () => {
         }));
 
         return { success: false, error: errorMsg };
+      } finally {
+        isGeneratingRef.current = false;
       }
     },
     [addLog, state.selectedModel],
@@ -592,6 +677,12 @@ export const useAgenticLoop = () => {
     async (code: string, userPrompt: string) => {
       if (!code.trim()) {
         return { success: false, error: "No generated code payload received." };
+      }
+
+      if (isGeneratingRef.current) {
+        const busyMessage = "Please wait for the current task to finish.";
+        addLog("execution", busyMessage, "warning");
+        return { success: false, error: busyMessage };
       }
 
       if (!webContainerAvailableRef.current || !webContainerService.isReady()) {
