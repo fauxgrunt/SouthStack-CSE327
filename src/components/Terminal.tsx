@@ -121,32 +121,36 @@ export const Terminal: React.FC<TerminalProps> = ({
 
     const xterm = xtermRef.current;
     let reader: ReadableStreamDefaultReader<string> | null = null;
-    let isReading = false;
+    let isMounted = true;
 
     const readStream = async () => {
       if (!processStream) return;
 
-      isReading = true;
       reader = processStream.getReader();
 
       try {
         // eslint-disable-next-line no-constant-condition
         while (true) {
+          if (!isMounted) break;
+
           const { done, value } = await reader.read();
 
           if (done) {
-            xterm.writeln("");
-            xterm.writeln("\x1b[1;32m[Process Completed]\x1b[0m");
+            if (isMounted) {
+              xterm.writeln("");
+              xterm.writeln("\x1b[1;32m[Process Completed]\x1b[0m");
+            }
             break;
           }
 
-          if (value) {
+          if (value && isMounted) {
             // Write output to terminal
             xterm.write(value);
           }
         }
       } catch (error: unknown) {
         if (
+          isMounted &&
           error &&
           typeof error === "object" &&
           "name" in error &&
@@ -158,18 +162,24 @@ export const Terminal: React.FC<TerminalProps> = ({
           xterm.writeln(`\x1b[1;31m[Stream Error: ${message}]\x1b[0m`);
         }
       } finally {
-        reader?.releaseLock();
-        isReading = false;
+        if (reader) {
+          reader.releaseLock();
+        }
       }
     };
 
     readStream();
 
-    // Cleanup: cancel the stream reader
+    // Cleanup: cancel the stream reader and mark component as unmounted
     return () => {
-      if (reader && isReading) {
-        reader.cancel();
-        reader.releaseLock();
+      isMounted = false;
+      if (reader) {
+        try {
+          reader.cancel();
+          reader.releaseLock();
+        } catch {
+          // Ignore errors on cleanup
+        }
       }
     };
   }, [processStream]);

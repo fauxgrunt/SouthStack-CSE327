@@ -1,37 +1,64 @@
 import React, {
-  useState,
-  useEffect,
-  useRef,
-  useMemo,
-  lazy,
-  Suspense,
   useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
 } from "react";
-import { useAgenticLoop } from "../hooks/useAgenticLoop";
-import { useSwarmManager } from "../hooks/useSwarmManager";
-import { useVoiceInput } from "../hooks/useVoiceInput";
-import { WindowControls } from "./WindowControls";
-import { LightweightCodeViewer } from "./LightweightCodeViewer";
-import { VirtualizedLogViewer } from "./VirtualizedLogViewer";
-import { SwarmControlPanel } from "./SwarmControlPanel";
+import { AnimatePresence, motion } from "framer-motion";
 import {
-  detectDeviceCapability,
-  getPerformanceConfig,
-  throttle,
-  limitArraySize,
-  type PerformanceConfig,
-} from "../utils/performance";
+  Camera,
+  Check,
+  ChevronDown,
+  ChevronUp,
+  CircleX,
+  Code2,
+  Copy,
+  Eye,
+  Loader2,
+  Mic,
+  Play,
+  SendHorizonal,
+  Sparkles,
+} from "lucide-react";
+import { useAgenticLoop } from "../hooks/useAgenticLoop";
+import type { ImageUiTaskMessage } from "../hooks/useSwarmManager";
+import { useSwarmManager } from "../hooks/useSwarmManager";
+import { useUIBuilder } from "../hooks/useUIBuilder";
+import { useVoiceInput } from "../hooks/useVoiceInput";
+import { extractUIFromImage } from "../services/VisionProcessor";
+import { limitArraySize } from "../utils/performance";
+import { AgentActivityStream } from "./AgentActivityStream";
+import { CollaborativeCodeEditor } from "./CollaborativeCodeEditor";
+import { SwarmConnectWidget } from "./SwarmConnectWidget";
 
-// Lazy load heavy syntax highlighter
-const SyntaxHighlighter = lazy(() =>
-  import("react-syntax-highlighter").then((module) => ({
-    default: module.Prism,
-  })),
-);
+type ActiveTab = "preview" | "code";
 
-/**
- * AgenticIDE - Professional IDE interface showcasing the autonomous coding workflow
- */
+type LogType = "info" | "success" | "error" | "warning";
+
+const MAX_SWARM_LOGS = 200;
+const MAX_BUILDER_LOGS = 500;
+
+interface AgentLogEntry {
+  timestamp: Date;
+  phase: string;
+  message: string;
+  type: LogType;
+}
+
+interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  timestamp: Date;
+}
+
+interface SwarmActivityLog {
+  id: string;
+  timestamp: Date;
+  message: string;
+}
+
 export const AgenticIDE: React.FC = () => {
   const {
     state,
@@ -41,47 +68,58 @@ export const AgenticIDE: React.FC = () => {
     isReady,
     engine,
   } = useAgenticLoop();
+
+  const [activeTab, setActiveTab] = useState<ActiveTab>("preview");
   const [userPrompt, setUserPrompt] = useState("");
-  const [codeCopied, setCodeCopied] = useState(false);
-  const [perfConfig, setPerfConfig] = useState<PerformanceConfig | null>(null);
-  const [highlighterStyle, setHighlighterStyle] = useState<any>(null);
-  const [showSwarmPanel, setShowSwarmPanel] = useState(false);
-  const [completedFiles, setCompletedFiles] = useState<
-    { fileName: string; content: string }[]
+  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
+  const [pauseAgentEdits, setPauseAgentEdits] = useState(false);
+  const [canvasCode, setCanvasCode] = useState<string | null>(null);
+
+  const [isConnectingPeer, setIsConnectingPeer] = useState(false);
+  const [networkError, setNetworkError] = useState<string | null>(null);
+  const [swarmActivityLogs, setSwarmActivityLogs] = useState<
+    SwarmActivityLog[]
   >([]);
-  const [selectedCompletedFileName, setSelectedCompletedFileName] = useState<
+  const [isDistributedProcessing, setIsDistributedProcessing] = useState(false);
+
+  const [attachedImageDataUrl, setAttachedImageDataUrl] = useState<
     string | null
   >(null);
-  const logsEndRef = useRef<HTMLDivElement>(null);
+  const [attachedImageName, setAttachedImageName] = useState<string | null>(
+    null,
+  );
+  const [isProcessingImage, setIsProcessingImage] = useState(false);
+  const [isAnalyzingImage, setIsAnalyzingImage] = useState(false);
+  const [multimodalError, setMultimodalError] = useState<string | null>(null);
+  const [copiedCodeId, setCopiedCodeId] = useState<string | null>(null);
+
+  const [isLogsExpanded, setIsLogsExpanded] = useState(false);
+  const [builderLogs, setBuilderLogs] = useState<AgentLogEntry[]>([]);
+
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const activeDistributedTaskRef = useRef<string | null>(null);
+  const isProcessingImageRef = useRef(false);
 
-  // File write handler for swarm (writes to console/logs)
+  const handleCopyCode = useCallback(async () => {
+    if (!canvasCode) return;
+    try {
+      await navigator.clipboard.writeText(canvasCode);
+      const id = `copied_${Date.now()}`;
+      setCopiedCodeId(id);
+      setTimeout(() => setCopiedCodeId(null), 2000);
+    } catch {
+      setMultimodalError("Failed to copy code to clipboard");
+    }
+  }, [canvasCode]);
+
   const handleSwarmFileWrite = useCallback(
-    async (fileName: string, content: string) => {
-      console.log(`[Swarm] File write: ${fileName} (${content.length} bytes)`);
-
-      // Store completed files from master writes so they can be inspected in the UI.
-      setCompletedFiles((prev) => {
-        const existingIndex = prev.findIndex(
-          (file) => file.fileName === fileName,
-        );
-
-        if (existingIndex >= 0) {
-          const next = [...prev];
-          next[existingIndex] = { fileName, content };
-          return next;
-        }
-
-        return [...prev, { fileName, content }];
-      });
-
-      // Auto-select first completed file for immediate visibility.
-      setSelectedCompletedFileName((prev) => prev ?? fileName);
+    async (_fileName: string, _content: string) => {
+      return;
     },
     [],
   );
 
-  // Initialize Swarm Manager with engine from useAgenticLoop
   const swarmManager = useSwarmManager(engine, handleSwarmFileWrite);
 
   const appendPromptTranscript = useCallback((transcript: string) => {
@@ -89,456 +127,888 @@ export const AgenticIDE: React.FC = () => {
       if (prev.trim().length === 0) {
         return transcript;
       }
-
       return `${prev}${/\s$/.test(prev) ? "" : " "}${transcript}`;
     });
   }, []);
 
   const promptVoice = useVoiceInput(appendPromptTranscript);
 
-  // Detect device capability and configure performance settings
-  useEffect(() => {
-    detectDeviceCapability().then((capability) => {
-      const config = getPerformanceConfig(capability);
-      setPerfConfig(config);
-
-      // Lazy load syntax highlighter style only if needed
-      if (config.syntaxHighlightingEnabled) {
-        import("react-syntax-highlighter/dist/esm/styles/prism").then(
-          (module) => {
-            setHighlighterStyle(module.vscDarkPlus);
-          },
-        );
-      }
+  const appendSwarmLog = useCallback((message: string) => {
+    setSwarmActivityLogs((prev) => {
+      const newLogs = [
+        ...prev,
+        {
+          id: `swarm_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          timestamp: new Date(),
+          message,
+        },
+      ];
+      return limitArraySize(newLogs, MAX_SWARM_LOGS);
     });
   }, []);
 
-  // Limit logs for memory management
-  const optimizedLogs = useMemo(() => {
-    if (!perfConfig) return state.logs;
-    return limitArraySize(state.logs, perfConfig.maxLogs);
-  }, [state.logs, perfConfig]);
-
-  // Auto-scroll logs with throttling for performance
-  const throttledScrollToBottom = useMemo(
-    () =>
-      throttle(() => {
-        if (logsEndRef.current && perfConfig) {
-          logsEndRef.current.scrollIntoView({
-            behavior: perfConfig.scrollBehavior,
-          });
-        }
-      }, perfConfig?.autoScrollThrottle || 100),
-    [perfConfig],
+  const handleBuilderLog = useCallback(
+    (phase: string, message: string, type: LogType = "info") => {
+      setBuilderLogs((prev) => {
+        const newLogs = [
+          ...prev,
+          {
+            timestamp: new Date(),
+            phase,
+            message,
+            type,
+          },
+        ];
+        return limitArraySize(newLogs, MAX_BUILDER_LOGS);
+      });
+    },
+    [],
   );
 
-  useEffect(() => {
-    if (!perfConfig?.useVirtualScrolling) {
-      throttledScrollToBottom();
-    }
-  }, [state.logs, perfConfig, throttledScrollToBottom]);
+  const {
+    previewUrl,
+    isBuilding,
+    error: uiBuilderError,
+  } = useUIBuilder(canvasCode, {
+    onLog: handleBuilderLog,
+  });
 
-  // Glow effect when code updates
-  useEffect(() => {
-    if (state.generatedCode) {
-      setCodeCopied(false);
-    }
-  }, [state.generatedCode]);
+  const peerStatus = useMemo(() => {
+    const connected =
+      swarmManager.connectionStatus === "connected" &&
+      swarmManager.activeConnectionCount > 0;
 
-  const handleExecute = async () => {
-    if (!userPrompt.trim()) return;
+    if (!swarmManager.isInitialized) {
+      return {
+        label: "Peer Offline",
+        tone: "text-zinc-400 border-zinc-700 bg-zinc-900",
+      };
+    }
+
+    if (!connected) {
+      return {
+        label: "Peer Ready",
+        tone: "text-zinc-300 border-zinc-700 bg-zinc-900",
+      };
+    }
+
+    if (swarmManager.swarmMode === "master") {
+      return {
+        label: "Swarm: Master Connected",
+        tone: "text-emerald-200 border-emerald-500/40 bg-emerald-500/10",
+      };
+    }
+
+    return {
+      label: "Swarm: Worker Connected",
+      tone: "text-cyan-200 border-cyan-500/40 bg-cyan-500/10",
+    };
+  }, [
+    swarmManager.activeConnectionCount,
+    swarmManager.connectionStatus,
+    swarmManager.isInitialized,
+    swarmManager.swarmMode,
+  ]);
+
+  const shouldOffloadToWorker = useMemo(
+    () =>
+      swarmManager.swarmMode === "master" &&
+      swarmManager.connectionStatus === "connected" &&
+      swarmManager.activeConnectionCount > 0,
+    [
+      swarmManager.activeConnectionCount,
+      swarmManager.connectionStatus,
+      swarmManager.swarmMode,
+    ],
+  );
+
+  const isAgentBusy = useMemo(
+    () =>
+      isDistributedProcessing ||
+      isAnalyzingImage ||
+      isBuilding ||
+      state.currentPhase === "generating" ||
+      state.currentPhase === "executing" ||
+      state.currentPhase === "fixing",
+    [isAnalyzingImage, isBuilding, isDistributedProcessing, state.currentPhase],
+  );
+
+  const minimalAgentStatus = useMemo(() => {
+    if (isAgentBusy) {
+      return "Agent working";
+    }
+
+    if (state.error || uiBuilderError || multimodalError) {
+      return "Agent needs attention";
+    }
+
+    return "Agent idle";
+  }, [isAgentBusy, multimodalError, state.error, uiBuilderError]);
+
+  const mergedLogs = useMemo(() => {
+    return [...state.logs, ...builderLogs].sort(
+      (a, b) => a.timestamp.getTime() - b.timestamp.getTime(),
+    );
+  }, [builderLogs, state.logs]);
+
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) {
+      return;
+    }
+
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 220)}px`;
+  }, [userPrompt]);
+
+  const readFileAsDataUrl = useCallback((file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+
+      reader.onload = () => {
+        if (typeof reader.result === "string") {
+          resolve(reader.result);
+          return;
+        }
+
+        reject(new Error("Could not read image data URL."));
+      };
+
+      reader.onerror = () => {
+        reject(new Error("Failed to read selected image."));
+      };
+
+      reader.readAsDataURL(file);
+    });
+  }, []);
+
+  const handleImageFile = useCallback(
+    async (file: File) => {
+      // Prevent concurrent image processing
+      if (isProcessingImageRef.current) {
+        return;
+      }
+
+      isProcessingImageRef.current = true;
+      setMultimodalError(null);
+      setIsProcessingImage(true);
+
+      try {
+        const imageDataUrl = await readFileAsDataUrl(file);
+        setAttachedImageDataUrl(imageDataUrl);
+        setAttachedImageName(file.name);
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Image attachment failed unexpectedly.";
+        setMultimodalError(`Image attachment failed: ${message}`);
+      } finally {
+        setIsProcessingImage(false);
+        isProcessingImageRef.current = false;
+      }
+    },
+    [readFileAsDataUrl],
+  );
+
+  const handleSendPrompt = async () => {
+    const trimmed = userPrompt.trim();
+    if (
+      !trimmed ||
+      !isReady ||
+      state.isExecuting ||
+      isAnalyzingImage ||
+      isBuilding
+    ) {
+      return;
+    }
 
     promptVoice.stopListening();
+    setUserPrompt("");
+    setActiveTab("preview");
+    setMultimodalError(null);
 
-    // Blur the textarea to prevent duplicate submissions
-    textareaRef.current?.blur();
+    const userMessage: ChatMessage = {
+      id: `user_${Date.now()}`,
+      role: "user",
+      content: trimmed,
+      timestamp: new Date(),
+    };
+    setChatHistory((prev) => [...prev, userMessage]);
 
-    // In production, fetch RAG context from your vector store (e.g., voy)
-    const mockRagContext = [
-      "// Example: Previous project files",
-      'const express = require("express");',
-      "const app = express();",
-    ];
+    if (shouldOffloadToWorker) {
+      const taskId = `p2p_ui_${Date.now()}`;
+      activeDistributedTaskRef.current = taskId;
+      setIsDistributedProcessing(true);
 
-    await executeAgenticLoop(userPrompt, mockRagContext);
-  };
+      const distributedPrompt = trimmed;
+      let imageDescription: string | undefined;
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // Enter without modifiers = execute
-    if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
-      e.preventDefault();
-      handleExecute();
-    }
-    // Ctrl + Enter or Shift + Enter = new line (default behavior)
-  };
+      if (attachedImageDataUrl) {
+        setIsAnalyzingImage(true);
+        try {
+          imageDescription = await extractUIFromImage(attachedImageDataUrl);
+          appendSwarmLog(
+            "[Swarm] Master: Image converted to textual UI description.",
+          );
+        } catch (error) {
+          const message =
+            error instanceof Error
+              ? error.message
+              : "Image analysis failed unexpectedly.";
+          setMultimodalError(`Image analysis failed: ${message}`);
+        } finally {
+          setIsAnalyzingImage(false);
+        }
+      }
 
-  const handleCopyCode = async () => {
-    if (state.generatedCode) {
-      await navigator.clipboard.writeText(state.generatedCode);
-      setCodeCopied(true);
-      setTimeout(() => setCodeCopied(false), 2000);
-    }
-  };
+      const payload: ImageUiTaskMessage = {
+        type: "IMAGE_UI_TASK",
+        taskId,
+        prompt: distributedPrompt,
+        imageDescription,
+        imageName: attachedImageName ?? undefined,
+      };
 
-  // Model selection removed - 0.5B is the only available model
+      appendSwarmLog("[Swarm] Master: Offloading prompt to Worker node...");
 
-  const formatStorageSize = (bytes: number): string => {
-    const gb = bytes / (1024 * 1024 * 1024);
-    return gb > 1
-      ? `${gb.toFixed(2)}GB`
-      : `${(bytes / (1024 * 1024)).toFixed(0)}MB`;
-  };
+      const sent = swarmManager.sendData(payload);
+      if (!sent) {
+        setIsDistributedProcessing(false);
+        activeDistributedTaskRef.current = null;
+        setMultimodalError("No open worker channel available for offload.");
+        setChatHistory((prev) => [
+          ...prev,
+          {
+            id: `assistant_${Date.now()}_offload_failed`,
+            role: "assistant",
+            content:
+              "I could not dispatch this prompt to a worker. Check swarm connection and retry.",
+            timestamp: new Date(),
+          },
+        ]);
+      } else {
+        setChatHistory((prev) => [
+          ...prev,
+          {
+            id: `assistant_${Date.now()}_offload`,
+            role: "assistant",
+            content:
+              "Task dispatched to worker. Master is waiting for distributed generation.",
+            timestamp: new Date(),
+          },
+        ]);
+      }
 
-  const getPhaseColor = () => {
-    switch (state.currentPhase) {
-      case "generating":
-        return "text-blue-400";
-      case "executing":
-        return "text-yellow-400";
-      case "fixing":
-        return "text-orange-400";
-      case "completed":
-        return "text-green-400";
-      case "error":
-        return "text-red-400";
-      default:
-        return "text-gray-400";
-    }
-  };
-
-  const getPhaseIcon = () => {
-    switch (state.currentPhase) {
-      case "generating":
-        return "[GEN]";
-      case "executing":
-        return "[EXEC]";
-      case "fixing":
-        return "[FIX]";
-      case "completed":
-        return "[DONE]";
-      case "error":
-        return "[ERR]";
-      default:
-        return "[IDLE]";
-    }
-  };
-
-  const isPhaseLoading = () => {
-    return ["generating", "executing", "fixing"].includes(state.currentPhase);
-  };
-
-  // Memoize language detection to avoid recomputation
-  const detectedLanguage = useMemo(() => {
-    if (!state.generatedCode) return "javascript";
-    const code = state.generatedCode;
-    if (
-      code.includes("import") ||
-      code.includes("export") ||
-      code.includes("const") ||
-      code.includes("let")
-    ) {
-      return code.includes("tsx") || code.includes("jsx")
-        ? "tsx"
-        : "javascript";
-    }
-    return "javascript";
-  }, [state.generatedCode]);
-
-  const selectedCompletedFile = useMemo(() => {
-    if (completedFiles.length === 0) {
-      return null;
+      setAttachedImageDataUrl(null);
+      setAttachedImageName(null);
+      return;
     }
 
-    if (selectedCompletedFileName) {
-      const selected = completedFiles.find(
-        (file) => file.fileName === selectedCompletedFileName,
-      );
-      if (selected) {
-        return selected;
+    let finalPrompt = trimmed;
+
+    if (attachedImageDataUrl) {
+      setIsAnalyzingImage(true);
+      try {
+        const extractedUiPrompt =
+          await extractUIFromImage(attachedImageDataUrl);
+        finalPrompt = [
+          trimmed,
+          "",
+          "[IMAGE ANALYSIS REQUIREMENTS]",
+          extractedUiPrompt,
+        ].join("\n");
+
+        setChatHistory((prev) => [
+          ...prev,
+          {
+            id: `assistant_${Date.now()}_image_context`,
+            role: "assistant",
+            content: "Image context extracted. Generating UI...",
+            timestamp: new Date(),
+          },
+        ]);
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Image analysis failed unexpectedly.";
+        setMultimodalError(`Image analysis failed: ${message}`);
+      } finally {
+        setIsAnalyzingImage(false);
       }
     }
 
-    return completedFiles[0];
-  }, [completedFiles, selectedCompletedFileName]);
+    const result = await executeAgenticLoop(finalPrompt);
 
-  const detectFileLanguage = (fileName: string): string => {
-    const lowerName = fileName.toLowerCase();
+    if (result && typeof result === "object" && "success" in result) {
+      if (result.success && "code" in result && result.code) {
+        setCanvasCode(result.code);
+      }
 
-    if (lowerName.endsWith(".py")) return "python";
-    if (lowerName.endsWith(".ts")) return "typescript";
-    if (lowerName.endsWith(".tsx")) return "tsx";
-    if (lowerName.endsWith(".js")) return "javascript";
-    if (lowerName.endsWith(".jsx")) return "jsx";
-    if (lowerName.endsWith(".json")) return "json";
-    if (lowerName.endsWith(".md")) return "markdown";
+      setChatHistory((prev) => [
+        ...prev,
+        {
+          id: `assistant_${Date.now()}_local_result`,
+          role: "assistant",
+          content: result.success
+            ? "Canvas updated. Preview is rebuilding now."
+            : `I hit an error and could not complete this request. ${result.error || "Unknown error."}`,
+          timestamp: new Date(),
+        },
+      ]);
+    }
 
-    return "text";
+    setAttachedImageDataUrl(null);
+    setAttachedImageName(null);
   };
 
+  useEffect(() => {
+    swarmManager.onImageUiStatus((payload) => {
+      if (swarmManager.swarmMode === "master") {
+        appendSwarmLog(`[Swarm] Worker: ${payload.message}`);
+      }
+    });
+
+    swarmManager.onImageUiTask(async (payload, conn) => {
+      if (swarmManager.swarmMode !== "worker") {
+        return;
+      }
+
+      const sendStatus = (message: string) => {
+        swarmManager.sendMessageToNode(conn, {
+          type: "IMAGE_UI_STATUS",
+          taskId: payload.taskId,
+          message,
+        });
+      };
+
+      sendStatus("Task received. Worker preparing generation pipeline...");
+
+      try {
+        if (!engine) {
+          throw new Error("Worker engine is not initialized.");
+        }
+
+        let workerPrompt = payload.prompt;
+
+        if (payload.imageDescription) {
+          sendStatus("Applying image description context...");
+          workerPrompt = [
+            payload.prompt,
+            "",
+            "[IMAGE ANALYSIS REQUIREMENTS]",
+            payload.imageDescription,
+          ].join("\n");
+        } else if (payload.imageBase64) {
+          // Backward compatibility with older masters that still send base64 payloads.
+          sendStatus("Analyzing image reference...");
+          const extractedUiPrompt = await extractUIFromImage(
+            payload.imageBase64,
+          );
+          workerPrompt = [
+            payload.prompt,
+            "",
+            "[IMAGE ANALYSIS REQUIREMENTS]",
+            extractedUiPrompt,
+          ].join("\n");
+        }
+
+        sendStatus("Generating UI code...");
+        const distributedResult = await executeAgenticLoop(workerPrompt);
+
+        if (!distributedResult?.success || !distributedResult.code) {
+          throw new Error(
+            distributedResult?.error ||
+              "Worker failed to generate a valid code payload.",
+          );
+        }
+
+        swarmManager.sendMessageToNode(conn, {
+          type: "IMAGE_UI_RESULT",
+          taskId: payload.taskId,
+          prompt: workerPrompt,
+          code: distributedResult.code,
+        });
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Worker execution failed unexpectedly.";
+
+        swarmManager.sendMessageToNode(conn, {
+          type: "IMAGE_UI_RESULT",
+          taskId: payload.taskId,
+          prompt: payload.prompt,
+          error: message,
+        });
+      }
+    });
+
+    swarmManager.onImageUiResult(async (payload) => {
+      if (swarmManager.swarmMode !== "master") {
+        return;
+      }
+
+      if (payload.taskId !== activeDistributedTaskRef.current) {
+        return;
+      }
+
+      setIsDistributedProcessing(false);
+      activeDistributedTaskRef.current = null;
+
+      if (payload.error || !payload.code) {
+        const message = payload.error || "No distributed code returned.";
+        setMultimodalError(`Distributed worker failed: ${message}`);
+        setChatHistory((prev) => [
+          ...prev,
+          {
+            id: `assistant_${Date.now()}_distributed_error`,
+            role: "assistant",
+            content: `Distributed generation failed: ${message}`,
+            timestamp: new Date(),
+          },
+        ]);
+        return;
+      }
+
+      appendSwarmLog("[Swarm] Worker complete. Rebuilding preview locally...");
+      setCanvasCode(payload.code);
+
+      setChatHistory((prev) => [
+        ...prev,
+        {
+          id: `assistant_${Date.now()}_distributed_complete`,
+          role: "assistant",
+          content:
+            "Worker returned code successfully. Rebuilding live preview now.",
+          timestamp: new Date(),
+        },
+      ]);
+    });
+
+    return () => {
+      swarmManager.onImageUiTask(null);
+      swarmManager.onImageUiStatus(null);
+      swarmManager.onImageUiResult(null);
+    };
+  }, [appendSwarmLog, engine, executeAgenticLoop, swarmManager]);
+
+  const handleConnectToPeer = useCallback(
+    async ({
+      targetPeerId,
+      role,
+    }: {
+      targetPeerId: string;
+      role: "master" | "worker";
+    }) => {
+      setNetworkError(null);
+      setIsConnectingPeer(true);
+
+      try {
+        if (role === "worker") {
+          if (!targetPeerId.trim()) {
+            swarmManager.setWorkerMode();
+          } else {
+            await swarmManager.connectToNode(targetPeerId, { asMaster: false });
+            swarmManager.setWorkerMode();
+          }
+          return;
+        }
+
+        if (!targetPeerId.trim()) {
+          throw new Error("Peer ID is required when joining as master.");
+        }
+
+        await swarmManager.connectToNode(targetPeerId, { asMaster: true });
+        swarmManager.promoteToMaster();
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Failed to connect.";
+        setNetworkError(message);
+      } finally {
+        setIsConnectingPeer(false);
+      }
+    },
+    [swarmManager],
+  );
+
+  const connectedPeers = useMemo(
+    () =>
+      swarmManager.connections.map((conn) => ({
+        id: conn.peer,
+        open: conn.open,
+      })),
+    [swarmManager.connections],
+  );
+
+  const swarmHeaderStatus = useMemo<"offline" | "master" | "worker">(() => {
+    if (!swarmManager.isInitialized) {
+      return "offline";
+    }
+
+    if (swarmManager.swarmMode === "master") {
+      return "master";
+    }
+
+    if (
+      swarmManager.swarmMode === "worker" ||
+      swarmManager.activeConnectionCount > 0
+    ) {
+      return "worker";
+    }
+
+    return "offline";
+  }, [
+    swarmManager.activeConnectionCount,
+    swarmManager.isInitialized,
+    swarmManager.swarmMode,
+  ]);
+
+  const handlePromptKeyDown = (
+    event: React.KeyboardEvent<HTMLTextAreaElement>,
+  ) => {
+    if (
+      event.key === "Enter" &&
+      !event.shiftKey &&
+      !event.ctrlKey &&
+      !event.metaKey
+    ) {
+      event.preventDefault();
+      void handleSendPrompt();
+    }
+  };
+
+  const detectedLanguage = useMemo(() => {
+    if (!canvasCode) {
+      return "javascript";
+    }
+
+    if (canvasCode.includes("tsx") || canvasCode.includes("jsx")) {
+      return "tsx";
+    }
+
+    return "javascript";
+  }, [canvasCode]);
+
+  // Quick actions palette (Cmd+K / Ctrl+K)
+  const [showQuickActions, setShowQuickActions] = useState(false);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault();
+        setShowQuickActions((prev) => !prev);
+      }
+      // Close palette with Escape
+      if (e.key === "Escape") {
+        setShowQuickActions(false);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-900 via-slate-900 to-gray-900 text-white p-8">
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap');
-        
-        @keyframes heartbeat {
-          0%, 100% { transform: scale(1); opacity: 1; }
-          50% { transform: scale(1.1); opacity: 0.8; }
-        }
-        
-        @keyframes spin {
-          from { transform: rotate(0deg); }
-          to { transform: rotate(360deg); }
-        }
-        
-        .heartbeat-pulse {
-          animation: ${perfConfig?.reduceAnimations ? "none" : "heartbeat 2s ease-in-out infinite"};
-        }
-        
-        .spinner {
-          animation: ${perfConfig?.reduceAnimations ? "spin 2s linear infinite" : "spin 1s linear infinite"};
-        }
-        
-        .copy-btn-glow {
-          box-shadow: 0 0 15px rgba(59, 130, 246, 0.6);
-        }
-        
-        /* Custom scrollbar styling for code container - thin and subtle */
-        .code-container {
-          scrollbar-gutter: stable;
-        }
-        
-        .code-container::-webkit-scrollbar {
-          height: 6px;
-          width: 6px;
-        }
-        
-        .code-container::-webkit-scrollbar-track {
-          background: transparent;
-        }
-        
-        .code-container::-webkit-scrollbar-thumb {
-          background: rgba(255, 255, 255, 0.1);
-          border-radius: 3px;
-        }
-        
-        .code-container::-webkit-scrollbar-thumb:hover {
-          background: rgba(255, 255, 255, 0.2);
-        }
-        
-        /* Hide scrollbar until hover */
-        .code-container::-webkit-scrollbar-thumb {
-          background: transparent;
-        }
-        
-        .code-container:hover::-webkit-scrollbar-thumb {
-          background: rgba(255, 255, 255, 0.1);
-        }
-        
-        .code-container:hover::-webkit-scrollbar-thumb:hover {
-          background: rgba(255, 255, 255, 0.2);
-        }
-      `}</style>
+    <div className="min-h-screen bg-zinc-950 text-zinc-100">
+      <div className="mx-auto flex max-w-[1500px] flex-col gap-4 px-4 pb-40 pt-4 sm:px-6 lg:px-8">
+        <header className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-zinc-800 bg-zinc-900/70 p-4">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight text-zinc-100 sm:text-3xl">
+              SouthStack Generative Canvas
+            </h1>
+            <p className="mt-1 text-sm text-zinc-400">
+              Describe what you want. Watch the UI appear.
+            </p>
+          </div>
 
-      <div className="max-w-7xl mx-auto">
-        {/* Header */}
-        <div className="mb-8">
-          <h1
-            className="text-5xl font-bold mb-2 bg-gradient-to-r from-blue-400 via-purple-500 to-pink-500 bg-clip-text text-transparent"
-            style={{ fontFamily: "'JetBrains Mono', monospace" }}
-          >
-            SouthStack AI IDE
-          </h1>
-          <p
-            className="text-gray-400 text-lg"
-            style={{ fontFamily: "'Fira Code', monospace" }}
-          >
-            Offline-First Agentic Coding • Zero Cloud Compute • Self-Healing AI
-          </p>
-        </div>
-
-        {/* Initialization */}
-        {!state.isInitialized && (
-          <div className="bg-slate-900/50 backdrop-blur-md rounded-lg p-6 mb-6 border border-slate-700 shadow-xl">
-            <h2
-              className="text-xl font-semibold mb-4"
-              style={{ fontFamily: "'JetBrains Mono', monospace" }}
+          <div className="flex items-center gap-2">
+            <span
+              className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] ${peerStatus.tone}`}
             >
-              Step 1: Configure & Initialize
-            </h2>
+              {peerStatus.label}
+            </span>
 
-            {/* Engine Badge - Static Display */}
-            <div className="mb-4">
-              <div className="flex items-center gap-3">
-                <div className="inline-flex items-center gap-2 bg-gradient-to-r from-blue-600/20 to-purple-600/20 border border-blue-500/50 rounded-lg px-4 py-3">
-                  <div className="w-2 h-2 rounded-full bg-blue-400 shadow-lg shadow-blue-400/50"></div>
-                  <span
-                    className="text-sm font-semibold text-blue-300"
-                    style={{ fontFamily: "'Fira Code', monospace" }}
-                  >
-                    Engine: Standard (0.5B)
-                  </span>
-                </div>
-                <div
-                  className="text-xs text-gray-400"
-                  style={{ fontFamily: "'Fira Code', monospace" }}
-                >
-                  ~500MB • Optimized for all devices
-                </div>
+            <SwarmConnectWidget
+              status={swarmHeaderStatus}
+              peerId={swarmManager.peerId}
+              connectedPeers={connectedPeers}
+              isConnecting={isConnectingPeer}
+              networkError={networkError}
+              onConnect={handleConnectToPeer}
+              onDisconnectAll={swarmManager.disconnectAll}
+            />
+
+            {!state.isInitialized ? (
+              <button
+                onClick={initializeEngine}
+                disabled={state.isLoading}
+                className="inline-flex items-center gap-2 rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-medium text-zinc-100 transition hover:border-zinc-500 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {state.isLoading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Play className="h-4 w-4" />
+                )}
+                {state.isLoading ? "Bootstrapping" : "Initialize"}
+              </button>
+            ) : (
+              <div className="inline-flex items-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300">
+                <Sparkles className="h-4 w-4" />
+                Ready
               </div>
+            )}
 
-              {/* Storage Info */}
-              {state.storageAvailable !== null && (
-                <div className="mt-3 flex items-center gap-2 bg-slate-800/50 border border-slate-600 rounded-lg p-3">
-                  <span className="text-blue-400 text-sm font-bold">ℹ</span>
-                  <div
-                    className="text-xs text-gray-300"
-                    style={{ fontFamily: "'Fira Code', monospace" }}
-                  >
-                    <span className="font-semibold">Available Storage:</span>{" "}
-                    {formatStorageSize(state.storageAvailable)}
-                  </div>
-                </div>
+            {state.isExecuting && (
+              <button
+                onClick={cancelExecution}
+                className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs font-medium text-rose-300 transition hover:bg-rose-500/20"
+              >
+                Stop
+              </button>
+            )}
+          </div>
+        </header>
+
+        <section className="rounded-2xl border border-zinc-800 bg-zinc-900/70">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 px-4 py-3">
+            <div className="relative flex rounded-xl border border-zinc-700 bg-zinc-900 p-1">
+              <button
+                onClick={() => setActiveTab("preview")}
+                className={`relative z-10 inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                  activeTab === "preview"
+                    ? "text-zinc-100"
+                    : "text-zinc-400 hover:text-zinc-200"
+                }`}
+              >
+                <Eye className="h-3.5 w-3.5" />
+                Preview
+              </button>
+              <button
+                onClick={() => setActiveTab("code")}
+                className={`relative z-10 inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                  activeTab === "code"
+                    ? "text-zinc-100"
+                    : "text-zinc-400 hover:text-zinc-200"
+                }`}
+              >
+                <Code2 className="h-3.5 w-3.5" />
+                Code
+              </button>
+              {activeTab === "preview" ? (
+                <motion.div
+                  layoutId="canvas-tab"
+                  className="absolute inset-y-1 left-1 right-[50%] rounded-lg bg-zinc-700"
+                />
+              ) : (
+                <motion.div
+                  layoutId="canvas-tab"
+                  className="absolute inset-y-1 left-[50%] right-1 rounded-lg bg-zinc-700"
+                />
               )}
             </div>
 
             <button
-              onClick={initializeEngine}
-              disabled={state.isLoading}
-              className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 disabled:from-gray-700 disabled:to-gray-700 disabled:cursor-not-allowed px-6 py-3 rounded-lg font-medium transition-all shadow-lg"
-              style={{ fontFamily: "'Fira Code', monospace" }}
+              type="button"
+              onClick={() => setIsLogsExpanded((prev) => !prev)}
+              className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 transition hover:bg-zinc-800"
             >
-              {state.isLoading ? "Loading Model..." : "Initialize AI Engine"}
+              {isLogsExpanded ? (
+                <ChevronUp className="h-3.5 w-3.5" />
+              ) : (
+                <ChevronDown className="h-3.5 w-3.5" />
+              )}
+              {isLogsExpanded ? "Collapse System Logs" : "Expand System Logs"}
+              <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">
+                {minimalAgentStatus}
+              </span>
             </button>
-            {state.isLoading && (
-              <div
-                className="mt-4 text-sm text-gray-400"
-                style={{ fontFamily: "'Fira Code', monospace" }}
-              >
-                <p>Downloading Standard 0.5B Engine (~500MB)...</p>
-                <p className="text-xs mt-2">
-                  This happens once - then fully offline!
-                </p>
-              </div>
-            )}
           </div>
-        )}
 
-        {/* Status Bar */}
-        {state.isInitialized && (
-          <div className="bg-slate-900/50 backdrop-blur-md rounded-lg p-4 mb-6 border border-slate-700 shadow-xl flex items-center justify-between">
-            <div
-              className="flex items-center gap-4"
-              style={{ fontFamily: "'Fira Code', monospace" }}
-            >
-              <div className="flex items-center gap-2">
-                <div
-                  className={`w-3 h-3 rounded-full ${isReady ? "bg-green-500 heartbeat-pulse" : "bg-gray-500"}`}
+          <AnimatePresence initial={false}>
+            {isLogsExpanded && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                exit={{ opacity: 0, height: 0 }}
+                className="border-b border-zinc-800 bg-zinc-950/60 px-3 py-3"
+              >
+                <AgentActivityStream
+                  logs={mergedLogs}
+                  swarmLogs={swarmActivityLogs}
+                  isInitialized={state.isInitialized}
+                  isLoading={state.isLoading}
+                  initProgress={state.initProgress}
+                  isListening={promptVoice.isListening}
+                  voiceError={promptVoice.error}
+                  currentPhase={isAgentBusy ? "executing" : state.currentPhase}
+                  retryCount={state.retryCount}
+                  generatedCode={canvasCode}
+                  error={state.error || uiBuilderError || multimodalError}
                 />
-                <span className="text-sm font-medium">
-                  {isReady ? "[READY] Offline" : "[BUSY]"}
-                </span>
-              </div>
-              <div className="text-xs text-gray-400 px-2 py-1 bg-slate-800 rounded border border-slate-600">
-                Engine: Standard (0.5B)
-              </div>
-              {/* Swarm Status Badge */}
-              {swarmManager.isInitialized && (
-                <div className="flex items-center gap-2 text-xs">
-                  <div
-                    className={`w-2 h-2 rounded-full ${swarmManager.activeConnectionCount > 0 ? "bg-green-500" : "bg-yellow-500"}`}
-                  />
-                  <span className="text-gray-300">
-                    P2P: {swarmManager.activeConnectionCount} nodes
-                  </span>
-                </div>
-              )}
-              <div
-                className={`text-sm font-medium ${getPhaseColor()} flex items-center gap-2`}
-              >
-                {getPhaseIcon()}
-                <span>{state.currentPhase.toUpperCase()}</span>
-                {isPhaseLoading() && (
-                  <svg
-                    className="spinner w-4 h-4"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                  >
-                    <circle
-                      className="opacity-25"
-                      cx="12"
-                      cy="12"
-                      r="10"
-                      stroke="currentColor"
-                      strokeWidth="4"
-                    ></circle>
-                    <path
-                      className="opacity-75"
-                      fill="currentColor"
-                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                    ></path>
-                  </svg>
-                )}
-              </div>
-              {state.retryCount > 0 && (
-                <div className="text-sm text-orange-400">
-                  [RETRY] Self-healing attempt: {state.retryCount}/3
-                </div>
-              )}
-            </div>
-            <div className="flex items-center gap-2">
-              {/* Swarm Toggle Button */}
-              <button
-                onClick={() => setShowSwarmPanel(!showSwarmPanel)}
-                className="bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded text-sm font-medium transition-colors"
-                style={{ fontFamily: "'Fira Code', monospace" }}
-              >
-                {showSwarmPanel ? "Hide" : "Show"} P2P Swarm
-              </button>
-              {state.isExecuting && (
-                <button
-                  onClick={cancelExecution}
-                  className="bg-red-600 hover:bg-red-700 px-4 py-2 rounded text-sm font-medium transition-colors"
-                  style={{ fontFamily: "'Fira Code', monospace" }}
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          <div className="h-[calc(100vh-320px)] min-h-[460px] bg-zinc-950/60 p-3">
+            <AnimatePresence mode="wait" initial={false}>
+              {activeTab === "preview" ? (
+                <motion.div
+                  key="preview-tab"
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -6 }}
+                  className="h-full overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950"
                 >
-                  Cancel
-                </button>
+                  {previewUrl ? (
+                    <iframe
+                      title="SouthStack Live Preview"
+                      src={previewUrl}
+                      className="h-full w-full"
+                      sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
+                    />
+                  ) : (
+                    <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+                      <Eye className="h-8 w-8 text-zinc-500" />
+                      <h3 className="text-sm font-semibold text-zinc-300">
+                        Your generated UI appears here
+                      </h3>
+                      <p className="max-w-md text-xs leading-relaxed text-zinc-500">
+                        Send a prompt to generate code, then we bundle and
+                        launch it in WebContainer for live preview.
+                      </p>
+                    </div>
+                  )}
+                </motion.div>
+              ) : (
+                <motion.div
+                  key="code-tab"
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -6 }}
+                  className="h-full overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 flex flex-col"
+                >
+                  {canvasCode && (
+                    <div className="border-b border-zinc-800 bg-zinc-900/50 px-4 py-2 flex items-center justify-between">
+                      <div className="flex items-center gap-4 text-[11px] text-zinc-400">
+                        <span>{canvasCode.split("\n").length} lines</span>
+                        <span>{canvasCode.length} chars</span>
+                      </div>
+                      <button
+                        onClick={handleCopyCode}
+                        className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-zinc-200 transition hover:bg-zinc-800 disabled:opacity-50"
+                        title="Copy code to clipboard"
+                      >
+                        {copiedCodeId ? (
+                          <>
+                            <Check className="h-3.5 w-3.5" />
+                            Copied!
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="h-3.5 w-3.5" />
+                            Copy
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  )}
+                  <div className="flex-1 overflow-hidden">
+                    <CollaborativeCodeEditor
+                      generatedCode={canvasCode}
+                      language={detectedLanguage}
+                      isAgentBusy={isAgentBusy}
+                      pauseAgentEdits={pauseAgentEdits}
+                      onPauseAgentEditsChange={setPauseAgentEdits}
+                    />
+                  </div>
+                </motion.div>
               )}
+            </AnimatePresence>
+          </div>
+        </section>
+      </div>
+
+      <div className="fixed inset-x-0 bottom-0 z-40 border-t border-zinc-800 bg-zinc-950/95 px-3 py-3 backdrop-blur">
+        <div className="mx-auto flex w-full max-w-3xl flex-col gap-2">
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            className="hidden"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) {
+                void handleImageFile(file);
+              }
+              event.currentTarget.value = "";
+            }}
+          />
+
+          {attachedImageDataUrl && (
+            <div className="rounded-lg border border-zinc-700 bg-zinc-900/80 p-2">
+              <div className="flex items-start gap-3">
+                <div className="relative h-16 w-24 overflow-hidden rounded-md border border-zinc-700 bg-zinc-950">
+                  <img
+                    src={attachedImageDataUrl}
+                    alt={attachedImageName ?? "Attached image"}
+                    className="h-full w-full object-cover"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAttachedImageDataUrl(null);
+                      setAttachedImageName(null);
+                    }}
+                    className="absolute right-1 top-1 rounded-full bg-zinc-950/80 p-0.5 text-zinc-200 transition hover:bg-zinc-800"
+                    title="Remove attached image"
+                  >
+                    <CircleX className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                <div className="min-w-0 flex-1 pt-0.5">
+                  <p className="truncate text-xs font-medium text-zinc-200">
+                    {attachedImageName ?? "Image attached"}
+                  </p>
+                  <p className="mt-1 text-[11px] text-zinc-500">
+                    This image is included in the next generation task.
+                  </p>
+                </div>
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* P2P Swarm Control Panel */}
-        {showSwarmPanel && swarmManager.isInitialized && (
-          <div className="mb-6">
-            <SwarmControlPanel
-              peerId={swarmManager.peerId}
-              connectionStatus={swarmManager.connectionStatus}
-              activeConnectionCount={swarmManager.activeConnectionCount}
-              swarmMode={swarmManager.swarmMode}
-              isProcessing={swarmManager.isProcessing}
-              currentTask={swarmManager.currentTask}
-              isInitialized={swarmManager.isInitialized}
-              connectToNode={swarmManager.connectToNode}
-              disconnectAll={swarmManager.disconnectAll}
-              distributeTask={swarmManager.distributeTask}
-              distributeDebugAnalysis={swarmManager.distributeDebugAnalysis}
-              getProgress={swarmManager.getProgress}
-              getAllTasks={swarmManager.getAllTasks}
-              isMasterHeartbeatHealthy={swarmManager.isMasterHeartbeatHealthy}
-            />
-          </div>
-        )}
-
-        {/* Prompt Input */}
-        {isReady && (
-          <div className="bg-slate-900/50 backdrop-blur-md rounded-lg p-6 mb-6 border border-slate-700 shadow-xl">
-            <div className="mb-4 flex items-center justify-between gap-3">
-              <h2
-                className="text-xl font-semibold"
-                style={{ fontFamily: "'JetBrains Mono', monospace" }}
+          <div className="rounded-2xl border border-zinc-700 bg-zinc-900 p-2">
+            <div className="mb-1 flex items-center justify-between px-1">
+              <span className="text-[11px] text-zinc-500">
+                {shouldOffloadToWorker
+                  ? "Master mode: prompt will be processed by worker"
+                  : "Local mode: prompt will run on this device"}
+              </span>
+              <span
+                className={`rounded-full border px-2 py-0.5 text-[10px] ${peerStatus.tone}`}
               >
-                Agentic Prompt
-              </h2>
+                {peerStatus.label}
+              </span>
+            </div>
+
+            <div className="flex items-end gap-2">
+              <button
+                type="button"
+                onClick={() => imageInputRef.current?.click()}
+                disabled={isAgentBusy || isProcessingImage}
+                className="mb-1 rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
+                title="Camera/Image"
+              >
+                {isProcessingImage ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Camera className="h-4 w-4" />
+                )}
+              </button>
+
               <button
                 type="button"
                 onClick={
@@ -546,317 +1016,147 @@ export const AgenticIDE: React.FC = () => {
                     ? promptVoice.stopListening
                     : promptVoice.startListening
                 }
-                disabled={!promptVoice.isSupported || state.isExecuting}
-                className="px-3 py-1.5 rounded-md text-xs font-semibold border border-slate-600 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                style={{ fontFamily: "'Fira Code', monospace" }}
+                disabled={!promptVoice.isSupported || isAgentBusy}
+                className="mb-1 rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
+                title="Voice input"
               >
-                {promptVoice.isListening ? "Stop Mic" : "Start Mic"}
+                <Mic className="h-4 w-4" />
               </button>
-            </div>
-            <textarea
-              ref={textareaRef}
-              value={userPrompt}
-              onChange={(e) => setUserPrompt(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Example: Create an Express.js server with a /health endpoint..."
-              className="w-full bg-slate-950/70 border border-slate-600 rounded-lg p-4 text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/50 min-h-[100px] text-sm transition-all"
-              style={{ fontFamily: "'Fira Code', monospace" }}
-              disabled={state.isExecuting}
-            />
-            {!promptVoice.isSupported && (
-              <p
-                className="mt-2 text-xs text-amber-300"
-                style={{ fontFamily: "'Fira Code', monospace" }}
-              >
-                Voice input is not supported in this browser.
-              </p>
-            )}
-            {promptVoice.error && (
-              <p
-                className="mt-2 text-xs text-red-300"
-                style={{ fontFamily: "'Fira Code', monospace" }}
-              >
-                {promptVoice.error}
-              </p>
-            )}
-            <p
-              className="mt-2 text-xs text-gray-400"
-              style={{ fontFamily: "'Fira Code', monospace" }}
-            >
-              Press{" "}
-              <kbd className="px-1.5 py-0.5 bg-slate-700 rounded border border-slate-600 text-gray-300">
-                Enter
-              </kbd>{" "}
-              to run,{" "}
-              <kbd className="px-1.5 py-0.5 bg-slate-700 rounded border border-slate-600 text-gray-300">
-                Ctrl + Enter
-              </kbd>{" "}
-              for new line
-            </p>
-            <button
-              onClick={handleExecute}
-              disabled={state.isExecuting || !userPrompt.trim()}
-              className="mt-4 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 disabled:from-gray-700 disabled:to-gray-700 disabled:cursor-not-allowed px-6 py-3 rounded-lg font-medium transition-all shadow-lg"
-              style={{ fontFamily: "'Fira Code', monospace" }}
-            >
-              {state.isExecuting
-                ? "Executing Agentic Loop..."
-                : "Execute Agentic Loop"}
-            </button>
-          </div>
-        )}
 
-        {/* Generated Code Preview - Professional IDE Style */}
-        {state.generatedCode && (
-          <div className="bg-slate-900/50 backdrop-blur-md rounded-lg mb-6 border border-slate-700 shadow-xl overflow-hidden">
-            {/* Code Editor Top Bar */}
-            <div className="bg-slate-800/80 px-4 py-3 flex items-center justify-between border-b border-slate-700">
-              {/* Window Control Dots */}
-              <WindowControls currentPhase={state.currentPhase} />
+              <textarea
+                ref={textareaRef}
+                value={userPrompt}
+                onChange={(event) => setUserPrompt(event.target.value)}
+                onKeyDown={handlePromptKeyDown}
+                placeholder="Describe the UI you want to generate..."
+                className="max-h-[220px] min-h-[72px] flex-1 resize-none bg-transparent px-1 py-1.5 text-sm text-zinc-100 outline-none placeholder:text-zinc-500"
+                disabled={!isReady || isAgentBusy}
+              />
 
-              {/* Filename */}
-              <div
-                className="absolute left-1/2 transform -translate-x-1/2 text-sm text-gray-400 font-medium"
-                style={{ fontFamily: "'Fira Code', monospace" }}
-              >
-                index.js
-              </div>
-
-              {/* Copy Button */}
               <button
-                onClick={handleCopyCode}
-                className={`px-3 py-1.5 rounded text-xs font-medium transition-all ${
-                  codeCopied
-                    ? "bg-green-600 text-white"
-                    : "bg-blue-600 hover:bg-blue-700 text-white copy-btn-glow"
-                }`}
-                style={{ fontFamily: "'Fira Code', monospace" }}
+                onClick={() => {
+                  void handleSendPrompt();
+                }}
+                disabled={!isReady || isAgentBusy || !userPrompt.trim()}
+                className="mb-1 inline-flex items-center gap-2 rounded-lg bg-zinc-100 px-3 py-1.5 text-xs font-semibold text-zinc-900 transition hover:bg-zinc-300 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
               >
-                {codeCopied ? "Copied!" : "Copy Code"}
+                {isAgentBusy ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <SendHorizonal className="h-3.5 w-3.5" />
+                )}
+                Send
               </button>
             </div>
-
-            {/* Syntax Highlighted Code */}
-            <div className="overflow-x-auto min-h-[200px] code-container pb-10">
-              {perfConfig?.syntaxHighlightingEnabled && highlighterStyle ? (
-                <Suspense
-                  fallback={
-                    <div className="p-6 text-gray-400 font-mono text-sm">
-                      Loading syntax highlighter...
-                    </div>
-                  }
-                >
-                  <SyntaxHighlighter
-                    language={detectedLanguage}
-                    style={highlighterStyle}
-                    customStyle={{
-                      margin: 0,
-                      padding: "1.5rem",
-                      paddingBottom: "2.5rem",
-                      background: "transparent",
-                      fontSize: "0.875rem",
-                      fontFamily: "'Fira Code', monospace",
-                      whiteSpace: "pre-wrap",
-                      wordBreak: "break-all",
-                      minHeight: "200px",
-                    }}
-                    showLineNumbers={true}
-                    wrapLines={true}
-                    lineNumberStyle={{ marginRight: "1rem", opacity: 0.5 }}
-                  >
-                    {state.generatedCode}
-                  </SyntaxHighlighter>
-                </Suspense>
-              ) : (
-                <LightweightCodeViewer
-                  code={state.generatedCode}
-                  language={detectedLanguage}
-                />
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Swarm Completed Files Viewer */}
-        {completedFiles.length > 0 && (
-          <div className="bg-slate-900/50 backdrop-blur-md rounded-lg mb-6 border border-slate-700 shadow-xl overflow-hidden">
-            <div className="bg-slate-800/80 px-4 py-3 border-b border-slate-700 flex items-center justify-between">
-              <div
-                className="text-sm text-gray-300 font-medium"
-                style={{ fontFamily: "'Fira Code', monospace" }}
-              >
-                Swarm Completed Files
-              </div>
-              <div
-                className="text-xs text-gray-400"
-                style={{ fontFamily: "'Fira Code', monospace" }}
-              >
-                {completedFiles.length} file
-                {completedFiles.length > 1 ? "s" : ""}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-[260px_1fr] min-h-[320px]">
-              <div className="border-r border-slate-700 bg-slate-950/50 p-3">
-                <div
-                  className="text-xs text-gray-400 mb-2"
-                  style={{ fontFamily: "'Fira Code', monospace" }}
-                >
-                  Output Files
-                </div>
-                <div className="space-y-2 max-h-[300px] overflow-y-auto">
-                  {completedFiles.map((file) => {
-                    const isSelected =
-                      selectedCompletedFile?.fileName === file.fileName;
-
-                    return (
-                      <button
-                        key={file.fileName}
-                        onClick={() =>
-                          setSelectedCompletedFileName(file.fileName)
-                        }
-                        className={`w-full text-left px-3 py-2 rounded border transition-colors ${
-                          isSelected
-                            ? "bg-blue-600/20 border-blue-500 text-blue-200"
-                            : "bg-slate-900/80 border-slate-700 text-gray-300 hover:bg-slate-800"
-                        }`}
-                        style={{ fontFamily: "'Fira Code', monospace" }}
-                      >
-                        <div className="text-xs font-semibold truncate">
-                          {file.fileName}
-                        </div>
-                        <div className="text-[11px] opacity-70 mt-1">
-                          {file.content.length} bytes
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div className="overflow-x-auto code-container">
-                {selectedCompletedFile &&
-                  (perfConfig?.syntaxHighlightingEnabled && highlighterStyle ? (
-                    <Suspense
-                      fallback={
-                        <div className="p-6 text-gray-400 font-mono text-sm">
-                          Loading syntax highlighter...
-                        </div>
-                      }
-                    >
-                      <SyntaxHighlighter
-                        language={detectFileLanguage(
-                          selectedCompletedFile.fileName,
-                        )}
-                        style={highlighterStyle}
-                        customStyle={{
-                          margin: 0,
-                          padding: "1.5rem",
-                          background: "transparent",
-                          fontSize: "0.875rem",
-                          fontFamily: "'Fira Code', monospace",
-                          whiteSpace: "pre-wrap",
-                          wordBreak: "break-all",
-                          minHeight: "320px",
-                        }}
-                        showLineNumbers={true}
-                        wrapLines={true}
-                        lineNumberStyle={{ marginRight: "1rem", opacity: 0.5 }}
-                      >
-                        {selectedCompletedFile.content}
-                      </SyntaxHighlighter>
-                    </Suspense>
-                  ) : (
-                    <LightweightCodeViewer
-                      code={selectedCompletedFile.content}
-                      language={detectFileLanguage(
-                        selectedCompletedFile.fileName,
-                      )}
-                    />
-                  ))}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Execution Logs with Terminal Styling */}
-        <div className="bg-slate-900/50 backdrop-blur-md rounded-lg border border-slate-700 shadow-xl overflow-hidden">
-          {/* Terminal Header Bar */}
-          <div className="bg-slate-800/80 px-4 py-3 flex items-center justify-between border-b border-slate-700">
-            <WindowControls currentPhase={state.currentPhase} />
-            <div
-              className="text-sm text-gray-400 font-medium"
-              style={{ fontFamily: "'Fira Code', monospace" }}
-            >
-              System Logs
-            </div>
-            <div className="w-20"></div>
           </div>
 
-          {/* Terminal Content */}
-          <div className="p-6">
-            {optimizedLogs.length === 0 ? (
-              <div
-                className="bg-slate-950/70 rounded-lg p-4 text-sm border border-slate-700"
-                style={{ fontFamily: "'Fira Code', monospace" }}
-              >
-                <p className="text-gray-500 italic">
-                  No logs yet. Initialize the engine to begin.
-                </p>
-              </div>
-            ) : perfConfig?.useVirtualScrolling ? (
-              <VirtualizedLogViewer logs={optimizedLogs} maxHeight={400} />
-            ) : (
-              <div
-                className="bg-slate-950/70 rounded-lg p-4 max-h-[400px] overflow-y-auto text-sm border border-slate-700"
-                style={{ fontFamily: "'Fira Code', monospace" }}
-              >
-                {optimizedLogs.map((log, idx) => (
-                  <div
-                    key={idx}
-                    className={`mb-2 pb-2 border-b border-slate-800 last:border-0 ${
-                      log.type === "error"
-                        ? "text-red-400"
-                        : log.type === "success"
-                          ? "text-green-400"
-                          : log.type === "warning"
-                            ? "text-yellow-400"
-                            : "text-gray-300"
-                    }`}
-                  >
-                    <span className="text-gray-500 text-xs">
-                      [{log.timestamp.toLocaleTimeString()}]
-                    </span>{" "}
-                    <span className="text-blue-400 font-semibold">
-                      [{log.phase}]
-                    </span>{" "}
-                    {log.message}
-                  </div>
-                ))}
-                <div ref={logsEndRef} />
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Error Display */}
-        {state.error && (
-          <div className="mt-6 bg-red-900/20 backdrop-blur-md border border-red-500 rounded-lg p-4 shadow-xl">
-            <h3
-              className="text-red-400 font-semibold mb-2"
-              style={{ fontFamily: "'JetBrains Mono', monospace" }}
-            >
-              Error
-            </h3>
-            <p
-              className="text-red-300 text-sm"
-              style={{ fontFamily: "'Fira Code', monospace" }}
-            >
-              {state.error}
+          {(promptVoice.error || multimodalError || uiBuilderError) && (
+            <p className="text-xs text-rose-300">
+              {promptVoice.error || multimodalError || uiBuilderError}
             </p>
-          </div>
-        )}
+          )}
+
+          {chatHistory.length > 0 && (
+            <div className="max-h-28 overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2">
+              {chatHistory.slice(-3).map((message) => (
+                <p
+                  key={message.id}
+                  className="mb-1 text-xs text-zinc-400 last:mb-0"
+                >
+                  <span className="font-medium text-zinc-300">
+                    {message.role === "user" ? "You" : "Agent"}:
+                  </span>
+                  {message.content}
+                </p>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
+
+      {/* Quick Actions Palette (Cmd+K) */}
+      <AnimatePresence>
+        {showQuickActions && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-start justify-center pt-20"
+            onClick={() => setShowQuickActions(false)}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: -10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: -10 }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-[320px] rounded-xl border border-zinc-700 bg-zinc-900 p-3 shadow-2xl"
+            >
+              <p className="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold px-2 py-1 mb-2">
+                Quick Actions
+              </p>
+              <div className="space-y-1">
+                <button
+                  onClick={() => {
+                    if (canvasCode && detectedLanguage === "tsx") {
+                      setActiveTab("preview");
+                    }
+                    setShowQuickActions(false);
+                  }}
+                  className="w-full text-left px-2.5 py-2 text-xs rounded-lg hover:bg-zinc-800 transition text-zinc-300"
+                >
+                  <span className="font-medium">View Preview</span>
+                  <p className="text-[10px] text-zinc-500 mt-0.5">Switch to preview tab</p>
+                </button>
+                <button
+                  onClick={() => {
+                    setActiveTab("code");
+                    setShowQuickActions(false);
+                  }}
+                  className="w-full text-left px-2.5 py-2 text-xs rounded-lg hover:bg-zinc-800 transition text-zinc-300"
+                >
+                  <span className="font-medium">View Code</span>
+                  <p className="text-[10px] text-zinc-500 mt-0.5">Switch to code tab</p>
+                </button>
+                <button
+                  onClick={() => {
+                    handleCopyCode();
+                    setShowQuickActions(false);
+                  }}
+                  disabled={!canvasCode}
+                  className="w-full text-left px-2.5 py-2 text-xs rounded-lg hover:bg-zinc-800 transition text-zinc-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <span className="font-medium">Copy Code</span>
+                  <p className="text-[10px] text-zinc-500 mt-0.5">Copy to clipboard</p>
+                </button>
+                <button
+                  onClick={() => {
+                    setIsLogsExpanded((prev) => !prev);
+                    setShowQuickActions(false);
+                  }}
+                  className="w-full text-left px-2.5 py-2 text-xs rounded-lg hover:bg-zinc-800 transition text-zinc-300"
+                >
+                  <span className="font-medium">Toggle Logs</span>
+                  <p className="text-[10px] text-zinc-500 mt-0.5">{isLogsExpanded ? "Hide" : "Show"} system logs</p>
+                </button>
+                <button
+                  onClick={() => {
+                    setChatHistory([]);
+                    setCanvasCode(null);
+                    setShowQuickActions(false);
+                  }}
+                  className="w-full text-left px-2.5 py-2 text-xs rounded-lg hover:bg-zinc-800 transition text-zinc-300"
+                >
+                  <span className="font-medium">Clear Canvas</span>
+                  <p className="text-[10px] text-zinc-500 mt-0.5">Reset chat and code</p>
+                </button>
+                <div className="border-t border-zinc-800 my-2 pt-2">
+                  <p className="text-[10px] text-zinc-500 px-2 py-1">Press <kbd className="px-1 py-0.5 bg-zinc-800 rounded text-[9px]">Esc</kbd> to close</p>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };

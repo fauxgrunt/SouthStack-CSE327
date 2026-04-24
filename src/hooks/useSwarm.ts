@@ -324,7 +324,10 @@ export const useSwarm = () => {
    * Connect to a target node (Master Node function)
    */
   const connectToNode = useCallback(
-    (targetId: string): Promise<DataConnection> => {
+    (
+      targetId: string,
+      options?: { asMaster?: boolean },
+    ): Promise<DataConnection> => {
       return new Promise((resolve, reject) => {
         if (!peerRef.current) {
           reject(new Error("Peer not initialized"));
@@ -359,7 +362,12 @@ export const useSwarm = () => {
             }
             return [...prev, conn];
           });
-          setIsMaster(true);
+          setIsMaster(options?.asMaster ?? true);
+          setConnectionStatus("connected");
+          masterLostNotifiedRef.current = false;
+          if (options?.asMaster === false) {
+            setIsMasterHeartbeatHealthy(true);
+          }
           resolve(conn);
         });
 
@@ -494,6 +502,16 @@ export const useSwarm = () => {
     console.log("[Swarm] Promoted current node to master mode");
   }, []);
 
+  const setWorkerMode = useCallback(() => {
+    setIsMaster(false);
+    setConnectionStatus((prev) =>
+      prev === "connected" ? "connected" : "ready",
+    );
+    setIsMasterHeartbeatHealthy(true);
+    masterLostNotifiedRef.current = false;
+    console.log("[Swarm] Set current node to worker mode");
+  }, []);
+
   /**
    * Disconnect from a specific node
    */
@@ -536,6 +554,7 @@ export const useSwarm = () => {
     onData,
     onMasterLost,
     promoteToMaster,
+    setWorkerMode,
     disconnectFromNode,
     disconnectAll,
   };

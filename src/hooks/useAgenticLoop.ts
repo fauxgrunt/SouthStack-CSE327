@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import * as webllm from "@mlc-ai/web-llm";
-import { limitArraySize } from "../utils/performance";
+import { detectDeviceCapability, limitArraySize } from "../utils/performance";
+import { webContainerService } from "../services/webcontainer";
 
 // Model Configuration - OPTIMIZED FOR 0.5B ONLY
 export type ModelType = "0.5B";
@@ -28,6 +29,7 @@ export const MODEL_CONFIGS = {
 interface AgenticLoopState {
   isInitialized: boolean;
   isLoading: boolean;
+  initProgress: number;
   isExecuting: boolean;
   currentPhase:
     | "idle"
@@ -42,6 +44,7 @@ interface AgenticLoopState {
   retryCount: number;
   selectedModel: ModelType;
   storageAvailable: number | null;
+  previewUrl: string | null;
 }
 
 interface LogEntry {
@@ -58,13 +61,21 @@ interface ExecutionResult {
   stackTrace?: string;
 }
 
-interface WebContainerMock {
-  writeFile: (path: string, content: string) => Promise<void>;
-  executeCommand: (command: string) => Promise<ExecutionResult>;
-  readFile: (path: string) => Promise<string>;
+interface WebContainerProcess {
+  kill: () => void;
+  exit: Promise<number>;
 }
 
-const MAX_RETRY_ATTEMPTS = 3;
+interface InferenceProfile {
+  name: "low" | "balanced" | "high" | "lite";
+  contextWindowSize: number;
+  maxCompletionTokens: number;
+  temperature: number;
+  retryAttempts: number;
+  runBuildValidation: boolean;
+}
+
+const WEBLLM_CONTEXT_SAFETY_MARGIN = 128;
 
 /**
  * useAgenticLoop - Core hook for autonomous AI coding with self-healing
@@ -79,6 +90,7 @@ export const useAgenticLoop = () => {
   const [state, setState] = useState<AgenticLoopState>({
     isInitialized: false,
     isLoading: false,
+    initProgress: 0,
     isExecuting: false,
     currentPhase: "idle",
     logs: [],
@@ -87,11 +99,18 @@ export const useAgenticLoop = () => {
     retryCount: 0,
     selectedModel: "0.5B", // Default to lightweight model
     storageAvailable: null,
+    previewUrl: null,
   });
 
   const engineRef = useRef<webllm.MLCEngine | null>(null);
-  const webContainerRef = useRef<WebContainerMock | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const dependenciesInstalledRef = useRef(false);
+  const devServerProcessRef = useRef<WebContainerProcess | null>(null);
+  const devServerUrlRef = useRef<string | null>(null);
+  const inferenceProfileRef = useRef<InferenceProfile>(
+    buildInferenceProfile("medium", true),
+  );
+  const liteModeRef = useRef(false);
 
   // Logging utility with automatic size limiting for memory management
   const addLog = useCallback(
@@ -192,7 +211,12 @@ export const useAgenticLoop = () => {
   const initializeEngine = useCallback(async () => {
     if (engineRef.current) return;
 
-    setState((prev) => ({ ...prev, isLoading: true, error: null }));
+    setState((prev) => ({
+      ...prev,
+      isLoading: true,
+      initProgress: 0,
+      error: null,
+    }));
     addLog(
       "initialization",
       "Initializing Standard 0.5B Optimized Engine...",
@@ -200,6 +224,8 @@ export const useAgenticLoop = () => {
     );
 
     try {
+      const capability = await detectDeviceCapability();
+
       // Ask for non-evictable storage quota before model download/caching.
       await requestPersistentStorage();
 
@@ -210,10 +236,36 @@ export const useAgenticLoop = () => {
       const navigatorWithGPU = navigator as typeof navigator & {
         gpu?: { requestAdapter: () => Promise<unknown> };
       };
-      if (!navigatorWithGPU.gpu) {
-        throw new Error(
-          "WebGPU not supported in this browser. Please use Chrome/Edge 113+",
+      const hasWebGPU = Boolean(navigatorWithGPU.gpu);
+      inferenceProfileRef.current = buildInferenceProfile(
+        capability,
+        hasWebGPU,
+      );
+
+      addLog(
+        "initialization",
+        `Performance profile: ${inferenceProfileRef.current.name}`,
+        "info",
+      );
+
+      await webContainerService.boot();
+      addLog("initialization", "WebContainer runtime ready", "success");
+
+      if (!hasWebGPU) {
+        liteModeRef.current = true;
+        addLog(
+          "initialization",
+          "WebGPU unavailable. Running in Lite mode for low-end device compatibility.",
+          "warning",
         );
+
+        setState((prev) => ({
+          ...prev,
+          isInitialized: true,
+          isLoading: false,
+          initProgress: 100,
+        }));
+        return;
       }
 
       const modelConfig = MODEL_CONFIGS["0.5B"];
@@ -228,13 +280,23 @@ export const useAgenticLoop = () => {
 
       // Progress tracking for model download
       engine.setInitProgressCallback((report: webllm.InitProgressReport) => {
+        const maybeProgress = (report as { progress?: number }).progress;
+        if (typeof maybeProgress === "number") {
+          setState((prev) => ({
+            ...prev,
+            initProgress: Math.max(
+              0,
+              Math.min(100, Math.round(maybeProgress * 100)),
+            ),
+          }));
+        }
         addLog("initialization", report.text, "info");
       });
 
       // Load the model with OOM and Quota protection
       try {
         await engine.reload(modelConfig.id, {
-          context_window_size: 2048, // Optimized context window for 0.5B
+          context_window_size: inferenceProfileRef.current.contextWindowSize,
         });
       } catch (loadError: any) {
         // Handle Quota Exceeded Error (Storage limit)
@@ -263,21 +325,24 @@ export const useAgenticLoop = () => {
         throw loadError;
       }
 
-      // Initialize mocked WebContainer
-      webContainerRef.current = createMockedWebContainer();
-
       addLog(
         "initialization",
         "Standard 0.5B Engine ready - fully offline!",
         "success",
       );
-      setState((prev) => ({ ...prev, isInitialized: true, isLoading: false }));
+      setState((prev) => ({
+        ...prev,
+        isInitialized: true,
+        isLoading: false,
+        initProgress: 100,
+      }));
     } catch (error: any) {
       const errorMsg = error.message || "Failed to initialize WebLLM";
       addLog("initialization", `ERROR: ${errorMsg}`, "error");
       setState((prev) => ({
         ...prev,
         isLoading: false,
+        initProgress: 0,
         error: errorMsg,
         currentPhase: "error",
       }));
@@ -285,23 +350,19 @@ export const useAgenticLoop = () => {
       // Cleanup on failure
       engineRef.current = null;
     }
-  }, [
-    addLog,
-    checkStorageAvailability,
-    requestPersistentStorage,
-    state.selectedModel,
-    state.storageAvailable,
-  ]);
+  }, [addLog, checkStorageAvailability, requestPersistentStorage]);
 
   /**
    * Main Agentic Loop - Autonomous code generation with self-healing
    */
   const executeAgenticLoop = useCallback(
     async (userPrompt: string, ragContext?: string[]) => {
-      if (!engineRef.current || !webContainerRef.current) {
-        addLog("execution", "Engine not initialized", "error");
+      if (!webContainerService.isReady()) {
+        addLog("execution", "Runtime not initialized", "error");
         return;
       }
+
+      const profile = inferenceProfileRef.current;
 
       // Create abort controller for this execution
       abortControllerRef.current = new AbortController();
@@ -320,7 +381,7 @@ export const useAgenticLoop = () => {
       let currentCode: string | null = null;
 
       try {
-        while (attempt < MAX_RETRY_ATTEMPTS) {
+        while (attempt < profile.retryAttempts) {
           if (abortControllerRef.current?.signal.aborted) {
             addLog("execution", "Execution cancelled by user", "warning");
             break;
@@ -344,6 +405,26 @@ export const useAgenticLoop = () => {
               ? userPrompt
               : buildFixPrompt(userPrompt, lastError!, currentCode!);
 
+          const compactUserMessage = compactPromptForLowEnd(userMessage);
+
+          const {
+            userPrompt: boundedUserMessage,
+            wasTruncated,
+            estimatedPromptTokens,
+          } = fitPromptToContextWindow(systemPrompt, compactUserMessage, {
+            contextWindowSize: profile.contextWindowSize,
+            maxCompletionTokens: profile.maxCompletionTokens,
+            safetyMarginTokens: WEBLLM_CONTEXT_SAFETY_MARGIN,
+          });
+
+          if (wasTruncated) {
+            addLog(
+              "generation",
+              `[Warning] Prompt truncated to fit context window. (~${estimatedPromptTokens} prompt tokens)`,
+              "warning",
+            );
+          }
+
           addLog(
             "generation",
             attempt === 1
@@ -353,18 +434,28 @@ export const useAgenticLoop = () => {
           );
 
           try {
-            const completion = await engineRef.current.chat.completions.create({
-              messages: [
-                { role: "system", content: systemPrompt },
-                { role: "user", content: userMessage },
-              ],
-              temperature: 0.7,
-              max_tokens: 1024,
-            });
+            if (!engineRef.current || liteModeRef.current) {
+              currentCode = generateLiteCodeFromPrompt(boundedUserMessage);
+              addLog(
+                "generation",
+                "Lite generation mode: using ultra-fast local template synthesis.",
+                "warning",
+              );
+            } else {
+              const completion =
+                await engineRef.current.chat.completions.create({
+                  messages: [
+                    { role: "system", content: systemPrompt },
+                    { role: "user", content: boundedUserMessage },
+                  ],
+                  temperature: profile.temperature,
+                  max_tokens: profile.maxCompletionTokens,
+                });
 
-            currentCode = extractCode(
-              completion.choices[0].message.content || "",
-            );
+              currentCode = extractCode(
+                completion.choices[0].message.content || "",
+              );
+            }
 
             if (!currentCode) {
               throw new Error("AI generated empty or invalid code");
@@ -389,14 +480,17 @@ export const useAgenticLoop = () => {
 
           // PHASE 2: Autonomous Execution
           setState((prev) => ({ ...prev, currentPhase: "executing" }));
-          addLog("execution", "Writing code to virtual filesystem...", "info");
-
-          const targetFile = "index.js";
-          await webContainerRef.current.writeFile(targetFile, currentCode);
-
-          addLog("execution", `Executing: node ${targetFile}`, "info");
-          const result = await webContainerRef.current.executeCommand(
-            `node ${targetFile}`,
+          const result = await executeCodeInWebContainer(
+            currentCode,
+            userPrompt,
+            addLog,
+            dependenciesInstalledRef,
+            devServerProcessRef,
+            devServerUrlRef,
+            profile.runBuildValidation,
+            (url) => {
+              setState((prev) => ({ ...prev, previewUrl: url }));
+            },
           );
 
           // PHASE 3: Result Analysis
@@ -413,18 +507,21 @@ export const useAgenticLoop = () => {
             return { success: true, code: currentCode, output: result.output };
           } else {
             // PHASE 4: Self-Healing Loop
-            lastError = result.error || "Unknown execution error";
+            const outputContext = result.output
+              ? `\n\nRuntime output:\n${result.output.slice(-4000)}`
+              : "";
+            lastError = `${result.error || "Unknown execution error"}${outputContext}`;
             addLog("execution", `ERROR: ${lastError}`, "error");
 
             if (result.stackTrace) {
               addLog("execution", `Stack trace: ${result.stackTrace}`, "error");
             }
 
-            if (attempt < MAX_RETRY_ATTEMPTS) {
+            if (attempt < profile.retryAttempts) {
               setState((prev) => ({ ...prev, currentPhase: "fixing" }));
               addLog(
                 "fixing",
-                `Self-healing attempt ${attempt}/${MAX_RETRY_ATTEMPTS}...`,
+                `Self-healing attempt ${attempt}/${profile.retryAttempts}...`,
                 "warning",
               );
               // Loop continues to retry
@@ -454,6 +551,69 @@ export const useAgenticLoop = () => {
         return { success: false, error: errorMsg };
       }
     },
+    [addLog, state.selectedModel],
+  );
+
+  const executeGeneratedCodeDirectly = useCallback(
+    async (code: string, userPrompt: string) => {
+      if (!code.trim()) {
+        return { success: false, error: "No generated code payload received." };
+      }
+
+      if (!webContainerService.isReady()) {
+        addLog("execution", "WebContainer runtime not ready", "error");
+        return { success: false, error: "WebContainer runtime not ready." };
+      }
+
+      setState((prev) => ({
+        ...prev,
+        isExecuting: true,
+        currentPhase: "executing",
+        error: null,
+        generatedCode: code,
+      }));
+
+      addLog(
+        "execution",
+        "Executing distributed code payload in WebContainer...",
+        "info",
+      );
+
+      const result = await executeCodeInWebContainer(
+        code,
+        userPrompt,
+        addLog,
+        dependenciesInstalledRef,
+        devServerProcessRef,
+        devServerUrlRef,
+        inferenceProfileRef.current.runBuildValidation,
+        (url) => {
+          setState((prev) => ({ ...prev, previewUrl: url }));
+        },
+      );
+
+      if (result.success) {
+        setState((prev) => ({
+          ...prev,
+          isExecuting: false,
+          currentPhase: "completed",
+          generatedCode: code,
+        }));
+
+        addLog("execution", "Distributed code execution successful", "success");
+        return { success: true, code, output: result.output };
+      }
+
+      const errorMsg = result.error || "Distributed execution failed.";
+      setState((prev) => ({
+        ...prev,
+        isExecuting: false,
+        currentPhase: "error",
+        error: errorMsg,
+      }));
+      addLog("execution", `FATAL ERROR: ${errorMsg}`, "error");
+      return { success: false, error: errorMsg };
+    },
     [addLog],
   );
 
@@ -475,6 +635,11 @@ export const useAgenticLoop = () => {
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }
+
+      if (devServerProcessRef.current) {
+        devServerProcessRef.current.kill();
+        devServerProcessRef.current = null;
+      }
     };
   }, []);
 
@@ -482,6 +647,7 @@ export const useAgenticLoop = () => {
     state,
     initializeEngine,
     executeAgenticLoop,
+    executeGeneratedCodeDirectly,
     cancelExecution,
     isReady: state.isInitialized && !state.isLoading,
     engine: engineRef.current,
@@ -491,6 +657,79 @@ export const useAgenticLoop = () => {
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
+
+function buildInferenceProfile(
+  capability: "low" | "medium" | "high",
+  hasWebGPU: boolean,
+): InferenceProfile {
+  if (!hasWebGPU) {
+    return {
+      name: "lite",
+      contextWindowSize: 1536,
+      maxCompletionTokens: 256,
+      temperature: 0.2,
+      retryAttempts: 1,
+      runBuildValidation: false,
+    };
+  }
+
+  if (capability === "low") {
+    return {
+      name: "low",
+      contextWindowSize: 2048,
+      maxCompletionTokens: 320,
+      temperature: 0.3,
+      retryAttempts: 1,
+      runBuildValidation: false,
+    };
+  }
+
+  if (capability === "high") {
+    return {
+      name: "high",
+      contextWindowSize: 4096,
+      maxCompletionTokens: 1024,
+      temperature: 0.7,
+      retryAttempts: 3,
+      runBuildValidation: true,
+    };
+  }
+
+  return {
+    name: "balanced",
+    contextWindowSize: 3072,
+    maxCompletionTokens: 640,
+    temperature: 0.5,
+    retryAttempts: 2,
+    runBuildValidation: false,
+  };
+}
+
+function compactPromptForLowEnd(prompt: string): string {
+  return prompt.replace(/\s{3,}/g, " ").trim();
+}
+
+function generateLiteCodeFromPrompt(prompt: string): string {
+  const title = prompt
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80)
+    .replace(/["`]/g, "");
+
+  return `export default function App() {
+  return (
+    <main style={{ fontFamily: "system-ui, sans-serif", padding: "1.25rem", lineHeight: 1.5 }}>
+      <section style={{ maxWidth: 720, margin: "0 auto", border: "1px solid #ddd", borderRadius: 12, padding: 16 }}>
+        <h1 style={{ marginTop: 0 }}>Fast Preview</h1>
+        <p style={{ color: "#333" }}><strong>Request:</strong> ${title}</p>
+        <p style={{ color: "#555" }}>
+          Running in Lite mode for low-end hardware. This keeps generation responsive on weak GPUs/CPUs and phones.
+        </p>
+      </section>
+    </main>
+  );
+}`;
+}
 
 /**
  * Build system prompt with RAG context injection and model-specific tuning
@@ -507,11 +746,12 @@ Guidelines:
 - Include all necessary imports
 - Handle errors gracefully
 - Use modern JavaScript/TypeScript practices
-- Ensure code runs in Node.js environment`;
+- If the request is UI-focused, return a React component suitable for src/App.jsx
+- If the request is backend-focused, return runnable Node.js code`;
 
   // Prompt tuning for smaller models
   if (modelType === "0.5B") {
-    prompt += `\n\nIMPORTANT: Be extremely concise. Use only standard Node.js core modules (fs, http, path, etc.). Do not explain the code. Focus on minimal, working implementations.`;
+    prompt += `\n\nIMPORTANT: Be concise and output code only. For UI requests, output one React component with a default export. For backend requests, prefer Node.js core modules.`;
   }
 
   if (ragContext && ragContext.length > 0) {
@@ -559,86 +799,311 @@ function extractCode(response: string): string {
   return response.trim();
 }
 
-/**
- * Create mocked WebContainer for demonstration
- * In production, replace with actual @webcontainer/api
- */
-function createMockedWebContainer(): WebContainerMock {
-  const virtualFS = new Map<string, string>();
+function estimateTokenCount(text: string): number {
+  // Fast approximation for English/code mixed text used only as a guardrail.
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
+function fitPromptToContextWindow(
+  systemPrompt: string,
+  userPrompt: string,
+  options: {
+    contextWindowSize: number;
+    maxCompletionTokens: number;
+    safetyMarginTokens: number;
+  },
+): {
+  userPrompt: string;
+  wasTruncated: boolean;
+  estimatedPromptTokens: number;
+} {
+  const systemTokens = estimateTokenCount(systemPrompt);
+  const userTokens = estimateTokenCount(userPrompt);
+  const availablePromptTokens =
+    options.contextWindowSize -
+    options.maxCompletionTokens -
+    options.safetyMarginTokens;
+
+  const maxUserTokens = Math.max(256, availablePromptTokens - systemTokens);
+
+  if (userTokens <= maxUserTokens) {
+    return {
+      userPrompt,
+      wasTruncated: false,
+      estimatedPromptTokens: systemTokens + userTokens,
+    };
+  }
+
+  const maxUserChars = Math.max(1024, maxUserTokens * 4);
+  const boundedUserPrompt =
+    userPrompt.slice(0, maxUserChars) +
+    "\n\n[Truncated by system to fit model context window]";
 
   return {
-    async writeFile(path: string, content: string): Promise<void> {
-      virtualFS.set(path, content);
-      await new Promise((resolve) => setTimeout(resolve, 100)); // Simulate I/O
-    },
+    userPrompt: boundedUserPrompt,
+    wasTruncated: true,
+    estimatedPromptTokens: systemTokens + estimateTokenCount(boundedUserPrompt),
+  };
+}
 
-    async executeCommand(command: string): Promise<ExecutionResult> {
-      await new Promise((resolve) => setTimeout(resolve, 200)); // Simulate execution
+function looksLikeReactCode(code: string, prompt: string): boolean {
+  const reactPatterns = [
+    /from\s+["']react["']/,
+    /React\./,
+    /export\s+default\s+function\s+[A-Z]/,
+    /return\s*\(\s*<[^>]+>/,
+    /<[A-Z][A-Za-z0-9]*[\s>]/,
+    /className\s*=\s*["']/,
+  ];
 
-      // Mock execution based on code analysis
-      const [cmd, ...args] = command.split(" ");
+  if (reactPatterns.some((pattern) => pattern.test(code))) {
+    return true;
+  }
 
-      if (cmd === "node" && args[0]) {
-        const code = virtualFS.get(args[0]);
+  return /react|component|ui|interface|layout/i.test(prompt);
+}
 
-        if (!code) {
-          return {
-            success: false,
-            output: "",
-            error: `Cannot find module '${args[0]}'`,
-            stackTrace: `Error: Cannot find module '${args[0]}'\n    at Object.<anonymous>`,
-          };
-        }
+function normalizeReactComponentCode(code: string): string {
+  if (/export\s+default/.test(code)) {
+    return code;
+  }
 
-        // Simple heuristic: check for common error patterns
-        if (code.includes("throw new Error") && !code.includes("try {")) {
-          return {
-            success: false,
-            output: "",
-            error: "Unhandled Error thrown",
-            stackTrace:
-              "Error: Unhandled Error thrown\n    at Object.<anonymous> (index.js:5:11)",
-          };
-        }
+  if (/function\s+App\s*\(/.test(code) || /const\s+App\s*=/.test(code)) {
+    return `${code}\n\nexport default App;`;
+  }
 
-        if (
-          code.includes("require(") &&
-          !code.includes("express") &&
-          !code.includes("fs")
-        ) {
-          // Simulate missing module error
-          const match = code.match(/require\(['"]([^'"]+)['"]\)/);
-          if (match) {
-            return {
-              success: false,
-              output: "",
-              error: `Cannot find module '${match[1]}'`,
-              stackTrace: `Error: Cannot find module '${match[1]}'\n    at Function.Module._resolveFilename`,
-            };
-          }
-        }
+  if (/return\s*\(\s*<[^>]+>/.test(code)) {
+    return `function App() {\n${code}\n}\n\nexport default App;`;
+  }
 
-        // Success case
+  return `export default function App() {\n  return (\n    <pre style={{ whiteSpace: \"pre-wrap\", fontFamily: \"monospace\", padding: \"1rem\" }}>\n      ${JSON.stringify(code)}\n    </pre>\n  );\n}`;
+}
+
+async function ensureReactWorkspace(
+  addLog: (phase: string, message: string, type?: LogEntry["type"]) => void,
+  dependenciesInstalledRef: { current: boolean },
+): Promise<ExecutionResult> {
+  try {
+    await webContainerService.mkdir("/src");
+
+    const packageJson = {
+      name: "southstack-live-ui",
+      private: true,
+      version: "0.0.1",
+      type: "module",
+      scripts: {
+        dev: "vite",
+        build: "vite build",
+        preview: "vite preview --host 0.0.0.0 --port 4173",
+      },
+      dependencies: {
+        react: "^18.3.1",
+        "react-dom": "^18.3.1",
+      },
+      devDependencies: {
+        vite: "^5.3.1",
+        "@vitejs/plugin-react": "^4.3.1",
+      },
+    };
+
+    await webContainerService.writeFile(
+      "/package.json",
+      JSON.stringify(packageJson, null, 2),
+    );
+
+    await webContainerService.writeFile(
+      "/vite.config.js",
+      `import { defineConfig } from \"vite\";\nimport react from \"@vitejs/plugin-react\";\n\nexport default defineConfig({\n  plugins: [react()],\n  server: {\n    host: \"0.0.0.0\",\n    port: 4173,\n  },\n});\n`,
+    );
+
+    await webContainerService.writeFile(
+      "/index.html",
+      `<!doctype html>\n<html lang=\"en\">\n  <head>\n    <meta charset=\"UTF-8\" />\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n    <title>SouthStack Live Preview</title>\n  </head>\n  <body>\n    <div id=\"root\"></div>\n    <script type=\"module\" src=\"/src/main.jsx\"></script>\n  </body>\n</html>\n`,
+    );
+
+    await webContainerService.writeFile(
+      "/src/main.jsx",
+      `import React from \"react\";\nimport ReactDOM from \"react-dom/client\";\nimport App from \"./App\";\n\nReactDOM.createRoot(document.getElementById(\"root\")).render(\n  <React.StrictMode>\n    <App />\n  </React.StrictMode>,\n);\n`,
+    );
+
+    if (!dependenciesInstalledRef.current) {
+      addLog(
+        "execution",
+        "Installing preview dependencies (cached after first install)...",
+        "info",
+      );
+
+      const installResult = await webContainerService.exec("npm", [
+        "install",
+        "--prefer-offline",
+        "--no-audit",
+        "--no-fund",
+      ]);
+      if (installResult.exitCode !== 0) {
         return {
-          success: true,
-          output:
-            "Server running on http://localhost:3000\nExecution completed successfully.",
+          success: false,
+          output: installResult.output,
+          error: "Dependency installation failed",
         };
       }
 
+      dependenciesInstalledRef.current = true;
+      addLog("execution", "Dependencies installed", "success");
+    }
+
+    return { success: true, output: "Workspace ready" };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return {
+      success: false,
+      output: message,
+      error: `Failed to prepare React workspace: ${message}`,
+    };
+  }
+}
+
+async function ensureDevServerRunning(
+  addLog: (phase: string, message: string, type?: LogEntry["type"]) => void,
+  devServerProcessRef: { current: WebContainerProcess | null },
+  devServerUrlRef: { current: string | null },
+  onPreviewUrlChange: (url: string | null) => void,
+): Promise<ExecutionResult> {
+  if (devServerProcessRef.current && devServerUrlRef.current) {
+    onPreviewUrlChange(devServerUrlRef.current);
+    return {
+      success: true,
+      output: `Dev server already running at ${devServerUrlRef.current}`,
+    };
+  }
+
+  try {
+    addLog("execution", "Starting Vite dev server...", "info");
+
+    const serverReadyPromise = new Promise<string>((resolve, reject) => {
+      const container = webContainerService.getContainer();
+      const timeout = window.setTimeout(() => {
+        reject(new Error("Timed out waiting for dev server to become ready"));
+      }, 15000);
+
+      container.on("server-ready", (port, url) => {
+        if (port === 4173) {
+          window.clearTimeout(timeout);
+          resolve(url);
+        }
+      });
+    });
+
+    const process = (await webContainerService.spawn("npm", [
+      "run",
+      "dev",
+      "--",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      "4173",
+    ])) as WebContainerProcess;
+
+    devServerProcessRef.current = process;
+    process.exit.then(() => {
+      devServerProcessRef.current = null;
+      devServerUrlRef.current = null;
+    });
+
+    const url = await serverReadyPromise;
+    devServerUrlRef.current = url;
+    onPreviewUrlChange(url);
+
+    return {
+      success: true,
+      output: `Dev server ready at ${url}`,
+    };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return {
+      success: false,
+      output: message,
+      error: `Failed to start dev server: ${message}`,
+    };
+  }
+}
+
+async function executeCodeInWebContainer(
+  code: string,
+  userPrompt: string,
+  addLog: (phase: string, message: string, type?: LogEntry["type"]) => void,
+  dependenciesInstalledRef: { current: boolean },
+  devServerProcessRef: { current: WebContainerProcess | null },
+  devServerUrlRef: { current: string | null },
+  runBuildValidation: boolean,
+  onPreviewUrlChange: (url: string | null) => void,
+): Promise<ExecutionResult> {
+  const runAsReactApp = looksLikeReactCode(code, userPrompt);
+
+  if (!runAsReactApp) {
+    addLog("execution", "Detected Node.js script mode", "info");
+    onPreviewUrlChange(null);
+    await webContainerService.writeFile("/index.js", code);
+    const result = await webContainerService.exec("node", ["/index.js"]);
+
+    if (result.exitCode !== 0) {
       return {
         success: false,
-        output: "",
-        error: `Command not found: ${cmd}`,
+        output: result.output,
+        error: "Node.js execution failed",
       };
-    },
+    }
 
-    async readFile(path: string): Promise<string> {
-      const content = virtualFS.get(path);
-      if (!content) {
-        throw new Error(`File not found: ${path}`);
-      }
-      return content;
-    },
+    return {
+      success: true,
+      output: result.output || "Node.js execution completed successfully.",
+    };
+  }
+
+  addLog("execution", "Detected React/JS UI mode", "info");
+
+  const workspaceResult = await ensureReactWorkspace(
+    addLog,
+    dependenciesInstalledRef,
+  );
+  if (!workspaceResult.success) {
+    return workspaceResult;
+  }
+
+  const appCode = normalizeReactComponentCode(code);
+  await webContainerService.writeFile("/src/App.jsx", appCode);
+  addLog("execution", "Updated /src/App.jsx in WebContainer", "success");
+
+  if (runBuildValidation) {
+    addLog("execution", "Running build validation...", "info");
+    const buildResult = await webContainerService.exec("npm", ["run", "build"]);
+    if (buildResult.exitCode !== 0) {
+      return {
+        success: false,
+        output: buildResult.output,
+        error: "Build failed",
+      };
+    }
+  } else {
+    addLog(
+      "execution",
+      "Skipping build validation for fast mode on low-end devices.",
+      "warning",
+    );
+  }
+
+  const devServerResult = await ensureDevServerRunning(
+    addLog,
+    devServerProcessRef,
+    devServerUrlRef,
+    onPreviewUrlChange,
+  );
+
+  if (!devServerResult.success) {
+    return devServerResult;
+  }
+
+  return {
+    success: true,
+    output: `React app built successfully. ${devServerResult.output}`,
   };
 }

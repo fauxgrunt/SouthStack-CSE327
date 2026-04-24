@@ -39,6 +39,44 @@ interface PersistedSwarmState {
   debugQueue: SwarmTaskPayload[];
 }
 
+export interface ImageUiTaskMessage {
+  type: "IMAGE_UI_TASK";
+  taskId: string;
+  prompt: string;
+  imageBase64?: string;
+  imageName?: string;
+  imageDescription?: string;
+}
+
+export interface ImageUiStatusMessage {
+  type: "IMAGE_UI_STATUS";
+  taskId: string;
+  message: string;
+}
+
+export interface ImageUiResultMessage {
+  type: "IMAGE_UI_RESULT";
+  taskId: string;
+  prompt: string;
+  code?: string;
+  error?: string;
+}
+
+type ImageUiTaskHandler = (
+  payload: ImageUiTaskMessage,
+  conn: DataConnection,
+) => void | Promise<void>;
+
+type ImageUiStatusHandler = (
+  payload: ImageUiStatusMessage,
+  conn: DataConnection,
+) => void | Promise<void>;
+
+type ImageUiResultHandler = (
+  payload: ImageUiResultMessage,
+  conn: DataConnection,
+) => void | Promise<void>;
+
 /**
  * Sequential File Write Queue
  *
@@ -167,10 +205,66 @@ export const useSwarmManager = (
   const dispatchCursorRef = useRef(0);
   const knownMasterPeerIdRef = useRef<string | null>(null);
   const openPeerSetRef = useRef<Set<string>>(new Set());
+  const imageUiTaskHandlerRef = useRef<ImageUiTaskHandler | null>(null);
+  const imageUiStatusHandlerRef = useRef<ImageUiStatusHandler | null>(null);
+  const imageUiResultHandlerRef = useRef<ImageUiResultHandler | null>(null);
   const handleTaskTimeoutRef = useRef<(taskId: string) => Promise<void>>(
     async () => {
       // no-op until callback is initialized
     },
+  );
+
+  const sendMessageToNode = useCallback(
+    (conn: DataConnection, payload: unknown) => {
+      if (!conn.open) {
+        return false;
+      }
+
+      try {
+        conn.send(payload);
+        return true;
+      } catch (error) {
+        console.warn("[SwarmManager] Failed to send custom message", {
+          peer: conn.peer,
+          error,
+        });
+        return false;
+      }
+    },
+    [],
+  );
+
+  const sendData = useCallback(
+    (payload: unknown, targetPeerId?: string) => {
+      const targetConnection = targetPeerId
+        ? connections.find((conn) => conn.peer === targetPeerId && conn.open)
+        : connections.find((conn) => conn.open);
+
+      if (!targetConnection) {
+        return false;
+      }
+
+      return sendMessageToNode(targetConnection, payload);
+    },
+    [connections, sendMessageToNode],
+  );
+
+  const onImageUiTask = useCallback((handler: ImageUiTaskHandler | null) => {
+    imageUiTaskHandlerRef.current = handler;
+  }, []);
+
+  const onImageUiStatus = useCallback(
+    (handler: ImageUiStatusHandler | null) => {
+      imageUiStatusHandlerRef.current = handler;
+    },
+    [],
+  );
+
+  const onImageUiResult = useCallback(
+    (handler: ImageUiResultHandler | null) => {
+      imageUiResultHandlerRef.current = handler;
+    },
+    [],
   );
 
   // Initialize file write queue
@@ -1079,6 +1173,27 @@ export const useSwarmManager = (
         return;
       }
 
+      if (typed.type === "IMAGE_UI_TASK" && imageUiTaskHandlerRef.current) {
+        void imageUiTaskHandlerRef.current(typed as ImageUiTaskMessage, conn);
+        return;
+      }
+
+      if (typed.type === "IMAGE_UI_STATUS" && imageUiStatusHandlerRef.current) {
+        void imageUiStatusHandlerRef.current(
+          typed as ImageUiStatusMessage,
+          conn,
+        );
+        return;
+      }
+
+      if (typed.type === "IMAGE_UI_RESULT" && imageUiResultHandlerRef.current) {
+        void imageUiResultHandlerRef.current(
+          typed as ImageUiResultMessage,
+          conn,
+        );
+        return;
+      }
+
       if (typed.type === "TASK_ASSIGN") {
         console.log("[SwarmManager] Routing TASK_ASSIGN to worker handler");
         void handleWorkerDataRef.current(typed, conn);
@@ -1548,6 +1663,13 @@ export const useSwarmManager = (
     distributeDebugAnalysis,
     getProgress,
     getAllTasks,
+
+    // Custom message hooks
+    sendMessageToNode,
+    sendData,
+    onImageUiTask,
+    onImageUiStatus,
+    onImageUiResult,
 
     // Standalone/Worker functions
     executeLocalTask,
