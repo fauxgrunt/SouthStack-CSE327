@@ -665,6 +665,18 @@ export const AgenticIDE: React.FC = () => {
     swarmManager.swarmMode,
   ]);
 
+  const mobileHeaderStatus = useMemo(() => {
+    if (state.isLoading) {
+      return "Booting";
+    }
+
+    if (state.isInitialized) {
+      return isAgentBusy ? "Working" : "Ready";
+    }
+
+    return "Offline";
+  }, [isAgentBusy, state.isInitialized, state.isLoading]);
+
   const handlePromptKeyDown = (
     event: React.KeyboardEvent<HTMLTextAreaElement>,
   ) => {
@@ -712,62 +724,87 @@ export const AgenticIDE: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
-      <div className="mx-auto flex max-w-[1500px] flex-col gap-4 px-4 pb-40 pt-4 sm:px-6 lg:px-8">
-        <header className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-zinc-800 bg-zinc-900/70 p-4">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-tight text-zinc-100 sm:text-3xl">
+      <div className="mx-auto flex max-w-[1500px] flex-col gap-4 px-3 pb-40 pt-3 sm:px-6 lg:px-8">
+        <header className="flex flex-col gap-3 rounded-2xl border border-zinc-800 bg-zinc-900/70 p-3 sm:p-4 md:flex-row md:items-center md:justify-between">
+          <div className="min-w-0">
+            <h1 className="text-xl font-semibold tracking-tight text-zinc-100 sm:text-2xl md:text-3xl">
               SouthStack Generative Canvas
             </h1>
-            <p className="mt-1 text-sm text-zinc-400">
+            <p className="mt-1 hidden text-sm text-zinc-400 md:block">
               Describe what you want. Watch the UI appear.
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
-            <span
-              className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] ${peerStatus.tone}`}
-            >
-              {peerStatus.label}
-            </span>
-
-            <SwarmConnectWidget
-              status={swarmHeaderStatus}
-              peerId={swarmManager.peerId}
-              connectedPeers={connectedPeers}
-              isConnecting={isConnectingPeer}
-              networkError={networkError}
-              onConnect={handleConnectToPeer}
-              onDisconnectAll={swarmManager.disconnectAll}
-            />
-
-            {!state.isInitialized ? (
-              <button
-                onClick={initializeEngine}
-                disabled={state.isLoading}
-                className="inline-flex items-center gap-2 rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-medium text-zinc-100 transition hover:border-zinc-500 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-60"
+          <div className="flex w-full flex-col gap-2 md:w-auto md:flex-row md:items-center md:justify-end md:gap-2">
+            <div className="flex items-center gap-2 overflow-x-auto whitespace-nowrap rounded-full border border-zinc-800 bg-zinc-950/40 px-2 py-1 md:hidden">
+              <span
+                className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] ${peerStatus.tone}`}
               >
-                {state.isLoading ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Play className="h-4 w-4" />
-                )}
-                {state.isLoading ? "Bootstrapping" : "Initialize"}
-              </button>
-            ) : (
-              <div className="inline-flex items-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300">
-                <Sparkles className="h-4 w-4" />
-                Ready
+                <span
+                  className={`h-2 w-2 rounded-full ${peerStatus.tone.includes("emerald") ? "bg-emerald-300" : peerStatus.tone.includes("cyan") ? "bg-cyan-300" : "bg-zinc-500"}`}
+                />
+                {peerStatus.label}
+              </span>
+              <span className="inline-flex items-center gap-1 rounded-full border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-300">
+                <Sparkles className="h-3 w-3" />
+                {mobileHeaderStatus}
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 md:flex-nowrap md:justify-end">
+              <div className="hidden md:block">
+                <span
+                  className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] ${peerStatus.tone}`}
+                >
+                  {peerStatus.label}
+                </span>
               </div>
-            )}
 
-            {state.isExecuting && (
-              <button
-                onClick={cancelExecution}
-                className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs font-medium text-rose-300 transition hover:bg-rose-500/20"
-              >
-                Stop
-              </button>
-            )}
+              <SwarmConnectWidget
+                status={swarmHeaderStatus}
+                peerId={swarmManager.peerId}
+                connectedPeers={connectedPeers}
+                isConnecting={isConnectingPeer}
+                networkError={networkError}
+                onConnect={handleConnectToPeer}
+                onDisconnectAll={swarmManager.disconnectAll}
+              />
+
+              {!state.isInitialized ? (
+                <button
+                  onClick={initializeEngine}
+                  disabled={state.isLoading}
+                  className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs font-medium text-zinc-100 transition hover:border-zinc-500 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-60 md:px-4 md:py-2 md:text-sm"
+                >
+                  {state.isLoading ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Play className="h-4 w-4" />
+                  )}
+                  <span className="hidden sm:inline">
+                    {state.isLoading ? "Bootstrapping" : "Initialize"}
+                  </span>
+                  <span className="sm:hidden">
+                    {state.isLoading ? "Boot" : "Init"}
+                  </span>
+                </button>
+              ) : (
+                <div className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300">
+                  <Sparkles className="h-4 w-4" />
+                  <span className="hidden sm:inline">Ready</span>
+                  <span className="sm:hidden">OK</span>
+                </div>
+              )}
+
+              {state.isExecuting && (
+                <button
+                  onClick={cancelExecution}
+                  className="inline-flex min-h-11 items-center rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs font-medium text-rose-300 transition hover:bg-rose-500/20"
+                >
+                  Stop
+                </button>
+              )}
+            </div>
           </div>
         </header>
 
@@ -930,7 +967,7 @@ export const AgenticIDE: React.FC = () => {
         </section>
       </div>
 
-      <div className="fixed inset-x-0 bottom-0 z-40 border-t border-zinc-800 bg-zinc-950/95 px-3 py-3 backdrop-blur">
+      <div className="fixed inset-x-0 bottom-0 z-40 border-t border-zinc-800 bg-zinc-950/95 px-3 py-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] backdrop-blur">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-2">
           <input
             ref={imageInputRef}
@@ -999,7 +1036,7 @@ export const AgenticIDE: React.FC = () => {
                 type="button"
                 onClick={() => imageInputRef.current?.click()}
                 disabled={isAgentBusy || isProcessingImage}
-                className="mb-1 rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
+                className="mb-1 inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
                 title="Camera/Image"
               >
                 {isProcessingImage ? (
@@ -1017,7 +1054,7 @@ export const AgenticIDE: React.FC = () => {
                     : promptVoice.startListening
                 }
                 disabled={!promptVoice.isSupported || isAgentBusy}
-                className="mb-1 rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
+                className="mb-1 inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
                 title="Voice input"
               >
                 <Mic className="h-4 w-4" />
@@ -1029,7 +1066,7 @@ export const AgenticIDE: React.FC = () => {
                 onChange={(event) => setUserPrompt(event.target.value)}
                 onKeyDown={handlePromptKeyDown}
                 placeholder="Describe the UI you want to generate..."
-                className="max-h-[220px] min-h-[72px] flex-1 resize-none bg-transparent px-1 py-1.5 text-sm text-zinc-100 outline-none placeholder:text-zinc-500"
+                className="min-w-0 max-h-[220px] min-h-[72px] flex-1 resize-none bg-transparent px-1 py-1.5 text-sm text-zinc-100 outline-none placeholder:text-zinc-500"
                 disabled={!isReady || isAgentBusy}
               />
 
@@ -1038,7 +1075,7 @@ export const AgenticIDE: React.FC = () => {
                   void handleSendPrompt();
                 }}
                 disabled={!isReady || isAgentBusy || !userPrompt.trim()}
-                className="mb-1 inline-flex items-center gap-2 rounded-lg bg-zinc-100 px-3 py-1.5 text-xs font-semibold text-zinc-900 transition hover:bg-zinc-300 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
+                className="mb-1 inline-flex min-h-11 items-center gap-2 rounded-lg bg-zinc-100 px-3 py-1.5 text-xs font-semibold text-zinc-900 transition hover:bg-zinc-300 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
               >
                 {isAgentBusy ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1105,7 +1142,9 @@ export const AgenticIDE: React.FC = () => {
                   className="w-full text-left px-2.5 py-2 text-xs rounded-lg hover:bg-zinc-800 transition text-zinc-300"
                 >
                   <span className="font-medium">View Preview</span>
-                  <p className="text-[10px] text-zinc-500 mt-0.5">Switch to preview tab</p>
+                  <p className="text-[10px] text-zinc-500 mt-0.5">
+                    Switch to preview tab
+                  </p>
                 </button>
                 <button
                   onClick={() => {
@@ -1115,7 +1154,9 @@ export const AgenticIDE: React.FC = () => {
                   className="w-full text-left px-2.5 py-2 text-xs rounded-lg hover:bg-zinc-800 transition text-zinc-300"
                 >
                   <span className="font-medium">View Code</span>
-                  <p className="text-[10px] text-zinc-500 mt-0.5">Switch to code tab</p>
+                  <p className="text-[10px] text-zinc-500 mt-0.5">
+                    Switch to code tab
+                  </p>
                 </button>
                 <button
                   onClick={() => {
@@ -1126,7 +1167,9 @@ export const AgenticIDE: React.FC = () => {
                   className="w-full text-left px-2.5 py-2 text-xs rounded-lg hover:bg-zinc-800 transition text-zinc-300 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <span className="font-medium">Copy Code</span>
-                  <p className="text-[10px] text-zinc-500 mt-0.5">Copy to clipboard</p>
+                  <p className="text-[10px] text-zinc-500 mt-0.5">
+                    Copy to clipboard
+                  </p>
                 </button>
                 <button
                   onClick={() => {
@@ -1136,7 +1179,9 @@ export const AgenticIDE: React.FC = () => {
                   className="w-full text-left px-2.5 py-2 text-xs rounded-lg hover:bg-zinc-800 transition text-zinc-300"
                 >
                   <span className="font-medium">Toggle Logs</span>
-                  <p className="text-[10px] text-zinc-500 mt-0.5">{isLogsExpanded ? "Hide" : "Show"} system logs</p>
+                  <p className="text-[10px] text-zinc-500 mt-0.5">
+                    {isLogsExpanded ? "Hide" : "Show"} system logs
+                  </p>
                 </button>
                 <button
                   onClick={() => {
@@ -1147,10 +1192,18 @@ export const AgenticIDE: React.FC = () => {
                   className="w-full text-left px-2.5 py-2 text-xs rounded-lg hover:bg-zinc-800 transition text-zinc-300"
                 >
                   <span className="font-medium">Clear Canvas</span>
-                  <p className="text-[10px] text-zinc-500 mt-0.5">Reset chat and code</p>
+                  <p className="text-[10px] text-zinc-500 mt-0.5">
+                    Reset chat and code
+                  </p>
                 </button>
                 <div className="border-t border-zinc-800 my-2 pt-2">
-                  <p className="text-[10px] text-zinc-500 px-2 py-1">Press <kbd className="px-1 py-0.5 bg-zinc-800 rounded text-[9px]">Esc</kbd> to close</p>
+                  <p className="text-[10px] text-zinc-500 px-2 py-1">
+                    Press{" "}
+                    <kbd className="px-1 py-0.5 bg-zinc-800 rounded text-[9px]">
+                      Esc
+                    </kbd>{" "}
+                    to close
+                  </p>
                 </div>
               </div>
             </motion.div>
