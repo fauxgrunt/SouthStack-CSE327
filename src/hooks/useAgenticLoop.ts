@@ -107,6 +107,7 @@ export const useAgenticLoop = () => {
   const dependenciesInstalledRef = useRef(false);
   const devServerProcessRef = useRef<WebContainerProcess | null>(null);
   const devServerUrlRef = useRef<string | null>(null);
+  const webContainerAvailableRef = useRef(true);
   const inferenceProfileRef = useRef<InferenceProfile>(
     buildInferenceProfile("medium", true),
   );
@@ -248,8 +249,20 @@ export const useAgenticLoop = () => {
         "info",
       );
 
-      await webContainerService.boot();
-      addLog("initialization", "WebContainer runtime ready", "success");
+      try {
+        await webContainerService.boot();
+        webContainerAvailableRef.current = true;
+        addLog("initialization", "WebContainer runtime ready", "success");
+      } catch (bootError: unknown) {
+        webContainerAvailableRef.current = false;
+        const bootMessage =
+          bootError instanceof Error ? bootError.message : "Unknown error";
+        addLog(
+          "initialization",
+          `WebContainer unavailable on this device/browser. Continuing without live runtime execution. (${bootMessage})`,
+          "warning",
+        );
+      }
 
       if (!hasWebGPU) {
         liteModeRef.current = true;
@@ -357,11 +370,6 @@ export const useAgenticLoop = () => {
    */
   const executeAgenticLoop = useCallback(
     async (userPrompt: string, ragContext?: string[]) => {
-      if (!webContainerService.isReady()) {
-        addLog("execution", "Runtime not initialized", "error");
-        return;
-      }
-
       const profile = inferenceProfileRef.current;
 
       // Create abort controller for this execution
@@ -478,6 +486,32 @@ export const useAgenticLoop = () => {
             throw genError;
           }
 
+          if (
+            !webContainerAvailableRef.current ||
+            !webContainerService.isReady()
+          ) {
+            addLog(
+              "execution",
+              "Skipping runtime execution because WebContainer is unavailable on this device/browser.",
+              "warning",
+            );
+
+            setState((prev) => ({
+              ...prev,
+              isExecuting: false,
+              currentPhase: "completed",
+              generatedCode: currentCode,
+              previewUrl: null,
+            }));
+
+            return {
+              success: true,
+              code: currentCode,
+              output:
+                "Code generated successfully. Live preview is unavailable on this device/browser.",
+            };
+          }
+
           // PHASE 2: Autonomous Execution
           setState((prev) => ({ ...prev, currentPhase: "executing" }));
           const result = await executeCodeInWebContainer(
@@ -560,9 +594,26 @@ export const useAgenticLoop = () => {
         return { success: false, error: "No generated code payload received." };
       }
 
-      if (!webContainerService.isReady()) {
-        addLog("execution", "WebContainer runtime not ready", "error");
-        return { success: false, error: "WebContainer runtime not ready." };
+      if (!webContainerAvailableRef.current || !webContainerService.isReady()) {
+        addLog(
+          "execution",
+          "Skipping distributed execution because WebContainer is unavailable on this device/browser.",
+          "warning",
+        );
+        setState((prev) => ({
+          ...prev,
+          isExecuting: false,
+          currentPhase: "completed",
+          error: null,
+          generatedCode: code,
+          previewUrl: null,
+        }));
+        return {
+          success: true,
+          code,
+          output:
+            "Distributed code received. Live preview is unavailable on this device/browser.",
+        };
       }
 
       setState((prev) => ({

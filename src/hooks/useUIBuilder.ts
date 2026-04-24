@@ -35,6 +35,7 @@ export function useUIBuilder(
   const dependenciesInstalledRef = useRef(false);
   const devServerProcessRef = useRef<WebContainerProcess | null>(null);
   const devServerUrlRef = useRef<string | null>(null);
+  const previewSupportedRef = useRef(true);
   const onLog = options?.onLog;
 
   useEffect(() => {
@@ -54,6 +55,16 @@ export function useUIBuilder(
     let cancelled = false;
 
     const run = async () => {
+      if (!previewSupportedRef.current) {
+        onLog?.(
+          "execution",
+          "Live preview is unavailable on this device/browser.",
+          "warning",
+        );
+        setIsBuilding(false);
+        return;
+      }
+
       setIsBuilding(true);
       setError(null);
       onLog?.("execution", "[Executing] Bundling and launching UI...", "info");
@@ -170,6 +181,15 @@ export function useUIBuilder(
           runError instanceof Error
             ? runError.message
             : "Failed to launch UI preview.";
+
+        if (
+          /SharedArrayBuffer|COOP|COEP|Failed to boot WebContainer/i.test(
+            message,
+          )
+        ) {
+          previewSupportedRef.current = false;
+        }
+
         if (!cancelled) {
           setError(message);
         }
