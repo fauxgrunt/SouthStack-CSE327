@@ -24,7 +24,6 @@ import {
 import { useAgenticLoop } from "../hooks/useAgenticLoop";
 import type { ImageUiTaskMessage } from "../hooks/useSwarmManager";
 import { useSwarmManager } from "../hooks/useSwarmManager";
-import { useUIBuilder } from "../hooks/useUIBuilder";
 import { useVoiceInput } from "../hooks/useVoiceInput";
 import { extractUIFromImage } from "../services/VisionProcessor";
 import { limitArraySize } from "../utils/performance";
@@ -34,17 +33,7 @@ import { SwarmConnectWidget } from "./SwarmConnectWidget";
 
 type ActiveTab = "preview" | "code";
 
-type LogType = "info" | "success" | "error" | "warning";
-
 const MAX_SWARM_LOGS = 200;
-const MAX_BUILDER_LOGS = 500;
-
-interface AgentLogEntry {
-  timestamp: Date;
-  phase: string;
-  message: string;
-  type: LogType;
-}
 
 interface ChatMessage {
   id: string;
@@ -64,6 +53,7 @@ export const AgenticIDE: React.FC = () => {
     state,
     initializeEngine,
     executeAgenticLoop,
+    executeGeneratedCodeDirectly,
     cancelExecution,
     isReady,
     engine,
@@ -94,7 +84,6 @@ export const AgenticIDE: React.FC = () => {
   const [copiedCodeId, setCopiedCodeId] = useState<string | null>(null);
 
   const [isLogsExpanded, setIsLogsExpanded] = useState(false);
-  const [builderLogs, setBuilderLogs] = useState<AgentLogEntry[]>([]);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
@@ -146,32 +135,6 @@ export const AgenticIDE: React.FC = () => {
       return limitArraySize(newLogs, MAX_SWARM_LOGS);
     });
   }, []);
-
-  const handleBuilderLog = useCallback(
-    (phase: string, message: string, type: LogType = "info") => {
-      setBuilderLogs((prev) => {
-        const newLogs = [
-          ...prev,
-          {
-            timestamp: new Date(),
-            phase,
-            message,
-            type,
-          },
-        ];
-        return limitArraySize(newLogs, MAX_BUILDER_LOGS);
-      });
-    },
-    [],
-  );
-
-  const {
-    previewUrl,
-    isBuilding,
-    error: uiBuilderError,
-  } = useUIBuilder(canvasCode, {
-    onLog: handleBuilderLog,
-  });
 
   const peerStatus = useMemo(() => {
     const connected =
@@ -226,11 +189,10 @@ export const AgenticIDE: React.FC = () => {
     () =>
       isDistributedProcessing ||
       isAnalyzingImage ||
-      isBuilding ||
       state.currentPhase === "generating" ||
       state.currentPhase === "executing" ||
       state.currentPhase === "fixing",
-    [isAnalyzingImage, isBuilding, isDistributedProcessing, state.currentPhase],
+    [isAnalyzingImage, isDistributedProcessing, state.currentPhase],
   );
 
   const minimalAgentStatus = useMemo(() => {
@@ -238,18 +200,16 @@ export const AgenticIDE: React.FC = () => {
       return "Agent working";
     }
 
-    if (state.error || uiBuilderError || multimodalError) {
+    if (state.error || multimodalError) {
       return "Agent needs attention";
     }
 
     return "Agent idle";
-  }, [isAgentBusy, multimodalError, state.error, uiBuilderError]);
+  }, [isAgentBusy, multimodalError, state.error]);
 
   const mergedLogs = useMemo(() => {
-    return [...state.logs, ...builderLogs].sort(
-      (a, b) => a.timestamp.getTime() - b.timestamp.getTime(),
-    );
-  }, [builderLogs, state.logs]);
+    return state.logs;
+  }, [state.logs]);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -313,13 +273,7 @@ export const AgenticIDE: React.FC = () => {
 
   const handleSendPrompt = async () => {
     const trimmed = userPrompt.trim();
-    if (
-      !trimmed ||
-      !isReady ||
-      state.isExecuting ||
-      isAnalyzingImage ||
-      isBuilding
-    ) {
+    if (!trimmed || !isReady || state.isExecuting || isAnalyzingImage) {
       return;
     }
 
@@ -572,16 +526,22 @@ export const AgenticIDE: React.FC = () => {
         return;
       }
 
-      appendSwarmLog("[Swarm] Worker complete. Rebuilding preview locally...");
+      appendSwarmLog("[Swarm] Worker complete. Rendering code and preview...");
       setCanvasCode(payload.code);
+
+      const previewResult = await executeGeneratedCodeDirectly(
+        payload.code,
+        payload.prompt,
+      );
 
       setChatHistory((prev) => [
         ...prev,
         {
           id: `assistant_${Date.now()}_distributed_complete`,
           role: "assistant",
-          content:
-            "Worker returned code successfully. Rebuilding live preview now.",
+          content: previewResult.success
+            ? "Worker returned code successfully. Preview updated."
+            : `Worker returned code, but preview failed: ${previewResult.error || "Unknown error."}`,
           timestamp: new Date(),
         },
       ]);
@@ -592,7 +552,13 @@ export const AgenticIDE: React.FC = () => {
       swarmManager.onImageUiStatus(null);
       swarmManager.onImageUiResult(null);
     };
-  }, [appendSwarmLog, engine, executeAgenticLoop, swarmManager]);
+  }, [
+    appendSwarmLog,
+    engine,
+    executeAgenticLoop,
+    executeGeneratedCodeDirectly,
+    swarmManager,
+  ]);
 
   const handleConnectToPeer = useCallback(
     async ({
@@ -882,7 +848,7 @@ export const AgenticIDE: React.FC = () => {
                   currentPhase={isAgentBusy ? "executing" : state.currentPhase}
                   retryCount={state.retryCount}
                   generatedCode={canvasCode}
-                  error={state.error || uiBuilderError || multimodalError}
+                  error={state.error || multimodalError}
                 />
               </motion.div>
             )}
@@ -898,10 +864,10 @@ export const AgenticIDE: React.FC = () => {
                   exit={{ opacity: 0, y: -6 }}
                   className="h-full overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950"
                 >
-                  {previewUrl ? (
+                  {state.previewUrl ? (
                     <iframe
                       title="SouthStack Live Preview"
-                      src={previewUrl}
+                      src={state.previewUrl}
                       className="h-full w-full"
                       sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
                     />
@@ -1087,9 +1053,9 @@ export const AgenticIDE: React.FC = () => {
             </div>
           </div>
 
-          {(promptVoice.error || multimodalError || uiBuilderError) && (
+          {(promptVoice.error || multimodalError) && (
             <p className="text-xs text-rose-300">
-              {promptVoice.error || multimodalError || uiBuilderError}
+              {promptVoice.error || multimodalError}
             </p>
           )}
 

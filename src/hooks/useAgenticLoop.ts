@@ -76,6 +76,7 @@ interface InferenceProfile {
 }
 
 const WEBLLM_CONTEXT_SAFETY_MARGIN = 128;
+const DEV_SERVER_STARTUP_TIMEOUT_MS = 60000;
 let sharedEngineInstance: webllm.MLCEngine | null = null;
 let sharedEngineInitPromise: Promise<webllm.MLCEngine> | null = null;
 
@@ -1125,7 +1126,7 @@ async function ensureDevServerRunning(
       const container = webContainerService.getContainer();
       const timeout = window.setTimeout(() => {
         reject(new Error("Timed out waiting for dev server to become ready"));
-      }, 15000);
+      }, DEV_SERVER_STARTUP_TIMEOUT_MS);
 
       container.on("server-ready", (port, url) => {
         if (port === 4173) {

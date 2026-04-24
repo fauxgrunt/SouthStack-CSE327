@@ -12,6 +12,9 @@ interface WebContainerProcess {
   exit: Promise<number>;
 }
 
+const PREVIEW_SERVER_TIMEOUT_MS = 60000;
+const PREVIEW_SERVER_RETRY_TIMEOUT_MS = 90000;
+
 function normalizeReactCode(code: string): string {
   if (/export\s+default/.test(code)) {
     return code;
@@ -37,6 +40,26 @@ export function useUIBuilder(
   const devServerUrlRef = useRef<string | null>(null);
   const previewSupportedRef = useRef(true);
   const onLog = options?.onLog;
+
+  const waitForPreviewServer = async (timeoutMs: number): Promise<string> => {
+    return new Promise<string>((resolve, reject) => {
+      const container = webContainerService.getContainer();
+      const timeout = window.setTimeout(() => {
+        reject(
+          new Error(
+            "Timed out waiting for preview server startup. Device may be slow; retrying once.",
+          ),
+        );
+      }, timeoutMs);
+
+      container.on("server-ready", (port, url) => {
+        if (port === 4173) {
+          window.clearTimeout(timeout);
+          resolve(url);
+        }
+      });
+    });
+  };
 
   useEffect(() => {
     return () => {
@@ -144,31 +167,48 @@ export function useUIBuilder(
           return;
         }
 
-        const serverReady = new Promise<string>((resolve, reject) => {
-          const container = webContainerService.getContainer();
-          const timeout = window.setTimeout(() => {
-            reject(new Error("Timed out waiting for preview server startup."));
-          }, 20000);
+        const startPreviewServer = async (): Promise<string> => {
+          const process = (await webContainerService.spawn("npm", [
+            "start",
+          ])) as WebContainerProcess;
+          devServerProcessRef.current = process;
 
-          container.on("server-ready", (port, url) => {
-            if (port === 4173) {
-              window.clearTimeout(timeout);
-              resolve(url);
-            }
+          process.exit.then(() => {
+            devServerProcessRef.current = null;
+            devServerUrlRef.current = null;
           });
-        });
 
-        const process = (await webContainerService.spawn("npm", [
-          "start",
-        ])) as WebContainerProcess;
-        devServerProcessRef.current = process;
+          return waitForPreviewServer(PREVIEW_SERVER_TIMEOUT_MS);
+        };
 
-        process.exit.then(() => {
-          devServerProcessRef.current = null;
-          devServerUrlRef.current = null;
-        });
+        let url: string;
+        try {
+          url = await startPreviewServer();
+        } catch (startupError) {
+          onLog?.(
+            "execution",
+            "Preview server startup is slow. Retrying once...",
+            "warning",
+          );
 
-        const url = await serverReady;
+          if (devServerProcessRef.current) {
+            devServerProcessRef.current.kill();
+            devServerProcessRef.current = null;
+          }
+
+          const process = (await webContainerService.spawn("npm", [
+            "start",
+          ])) as WebContainerProcess;
+          devServerProcessRef.current = process;
+
+          process.exit.then(() => {
+            devServerProcessRef.current = null;
+            devServerUrlRef.current = null;
+          });
+
+          url = await waitForPreviewServer(PREVIEW_SERVER_RETRY_TIMEOUT_MS);
+        }
+
         devServerUrlRef.current = url;
 
         if (!cancelled) {
