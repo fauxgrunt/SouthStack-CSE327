@@ -894,7 +894,7 @@ Guidelines:
 
   // Prompt tuning for smaller models
   if (modelType === "0.5B") {
-    prompt += `\n\nIMPORTANT: Be concise and output code only. For UI requests, output one React component with a default export. For backend requests, prefer Node.js core modules.`;
+    prompt += `\n\nIMPORTANT: Output code only. Do not include explanations, markdown, or code fences. For UI requests, output one React component with a default export. For backend requests, prefer Node.js core modules.`;
   }
 
   if (ragContext && ragContext.length > 0) {
@@ -930,16 +930,47 @@ Please fix the error and generate corrected code that will execute successfully.
  * Extract code from LLM response (handles markdown code blocks)
  */
 function extractCode(response: string): string {
-  // Try to extract from markdown code blocks
-  const codeBlockMatch = response.match(
-    /```(?:javascript|js|typescript|ts)?\n([\s\S]*?)\n```/,
-  );
-  if (codeBlockMatch) {
-    return codeBlockMatch[1].trim();
+  const trimmed = response.trim();
+
+  // Prefer fenced code blocks first (supports jsx/tsx and unknown fence labels).
+  const fencedBlockMatch = trimmed.match(/```[a-zA-Z0-9_-]*\s*\n([\s\S]*?)```/);
+  if (fencedBlockMatch) {
+    return fencedBlockMatch[1].trim();
   }
 
-  // If no code block, return trimmed response
-  return response.trim();
+  // Handle partially fenced responses.
+  const unfenced = trimmed
+    .replace(/^```[a-zA-Z0-9_-]*\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
+
+  // If the model prepends prose (e.g., "Certainly!"), slice from first likely code token.
+  const codeStartPatterns = [
+    /\bimport\s+.+from\s+["']/,
+    /\bexport\s+default\b/,
+    /\bfunction\s+App\s*\(/,
+    /\bconst\s+App\s*=\s*/,
+    /\bclass\s+\w+\s+extends\s+React\.Component\b/,
+    /<main[\s>]/,
+    /<div[\s>]/,
+    /return\s*\(\s*</,
+  ];
+
+  let startIndex = -1;
+  for (const pattern of codeStartPatterns) {
+    const match = unfenced.match(pattern);
+    if (match?.index !== undefined) {
+      if (startIndex === -1 || match.index < startIndex) {
+        startIndex = match.index;
+      }
+    }
+  }
+
+  if (startIndex > 0) {
+    return unfenced.slice(startIndex).trim();
+  }
+
+  return unfenced;
 }
 
 function estimateTokenCount(text: string): number {
