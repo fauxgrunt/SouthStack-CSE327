@@ -1,5 +1,7 @@
 import React, { useMemo, useState } from "react";
 import {
+  Check,
+  Copy,
   Crown,
   Loader2,
   Network,
@@ -63,6 +65,7 @@ export const SwarmConnectWidget: React.FC<SwarmConnectWidgetProps> = ({
   const [isOpen, setIsOpen] = useState(false);
   const [targetPeerId, setTargetPeerId] = useState("");
   const [role, setRole] = useState<JoinRole>("master");
+  const [copiedValue, setCopiedValue] = useState<string | null>(null);
 
   const statusMeta = statusStyles[status];
 
@@ -76,6 +79,22 @@ export const SwarmConnectWidget: React.FC<SwarmConnectWidgetProps> = ({
       targetPeerId: targetPeerId.trim(),
       role,
     });
+  };
+
+  const handleCopy = async (value: string, copyKey: string) => {
+    if (!value) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopiedValue(copyKey);
+      window.setTimeout(() => {
+        setCopiedValue((prev) => (prev === copyKey ? null : prev));
+      }, 1800);
+    } catch {
+      // Ignore clipboard failures silently to avoid disrupting flow.
+    }
   };
 
   return (
@@ -119,9 +138,31 @@ export const SwarmConnectWidget: React.FC<SwarmConnectWidgetProps> = ({
             </div>
 
             <div className="mb-3 rounded-lg border border-zinc-700 bg-zinc-950/70 p-2">
-              <div className="mb-1 flex items-center gap-2 text-[11px] text-zinc-400">
-                <Signal className="h-3.5 w-3.5" />
-                Local Peer ID
+              <div className="mb-1 flex items-center justify-between gap-2 text-[11px] text-zinc-400">
+                <span className="inline-flex items-center gap-2">
+                  <Signal className="h-3.5 w-3.5" />
+                  Local Peer ID
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleCopy(peerId ?? "", "local-peer-id");
+                  }}
+                  disabled={!peerId}
+                  className="inline-flex items-center gap-1 rounded border border-zinc-700 px-2 py-1 text-[10px] text-zinc-300 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {copiedValue === "local-peer-id" ? (
+                    <>
+                      <Check className="h-3.5 w-3.5" />
+                      Copied
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="h-3.5 w-3.5" />
+                      Copy
+                    </>
+                  )}
+                </button>
               </div>
               <p className="truncate text-xs text-zinc-200">
                 {peerId ?? "Initializing PeerJS..."}
@@ -175,9 +216,7 @@ export const SwarmConnectWidget: React.FC<SwarmConnectWidgetProps> = ({
               onClick={() => {
                 void handleConnect();
               }}
-              disabled={
-                isConnecting || (role === "master" && !targetPeerId.trim())
-              }
+              disabled={isConnecting || !targetPeerId.trim()}
               className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-lg border border-cyan-500/40 bg-cyan-500/15 px-3 py-3 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-500/25 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {isConnecting ? (
@@ -188,9 +227,21 @@ export const SwarmConnectWidget: React.FC<SwarmConnectWidgetProps> = ({
               {isConnecting ? "Connecting..." : "Connect"}
             </button>
 
-            {role === "worker" && !targetPeerId.trim() && (
+            {!targetPeerId.trim() && (
               <p className="mt-2 text-[11px] text-zinc-500">
-                Worker mode without target ID waits for a master to connect.
+                Paste a peer ID, then choose Master or Worker to connect.
+              </p>
+            )}
+
+            {role === "worker" && targetPeerId.trim() && (
+              <p className="mt-2 text-[11px] text-zinc-500">
+                You join as Worker and connect to the provided master peer ID.
+              </p>
+            )}
+
+            {role === "master" && targetPeerId.trim() && (
+              <p className="mt-2 text-[11px] text-zinc-500">
+                You stay Master and the connected peer joins as Worker.
               </p>
             )}
 
@@ -229,15 +280,31 @@ export const SwarmConnectWidget: React.FC<SwarmConnectWidgetProps> = ({
                         <UserRound className="h-3.5 w-3.5 shrink-0" />
                         <span className="truncate">{peer.id}</span>
                       </div>
-                      <span
-                        className={`rounded px-1 py-0.5 text-[10px] ${
-                          peer.open
-                            ? "bg-emerald-500/20 text-emerald-200"
-                            : "bg-zinc-700 text-zinc-300"
-                        }`}
-                      >
-                        {peer.open ? "online" : "closed"}
-                      </span>
+                      <div className="inline-flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void handleCopy(peer.id, `peer-${peer.id}`);
+                          }}
+                          className="inline-flex items-center gap-1 rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-300 transition hover:bg-zinc-800"
+                          aria-label={`Copy peer ID ${peer.id}`}
+                        >
+                          {copiedValue === `peer-${peer.id}` ? (
+                            <Check className="h-3 w-3" />
+                          ) : (
+                            <Copy className="h-3 w-3" />
+                          )}
+                        </button>
+                        <span
+                          className={`rounded px-1 py-0.5 text-[10px] ${
+                            peer.open
+                              ? "bg-emerald-500/20 text-emerald-200"
+                              : "bg-zinc-700 text-zinc-300"
+                          }`}
+                        >
+                          {peer.open ? "online" : "closed"}
+                        </span>
+                      </div>
                     </div>
                   ))}
                 </div>

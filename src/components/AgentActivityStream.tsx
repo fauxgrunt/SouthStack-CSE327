@@ -88,6 +88,31 @@ function parseProgressPercent(message: string): number | null {
   return clampPercent(parsed);
 }
 
+function formatLogsForDisplay(
+  relevantLogs: AgentLogEntry[],
+  fallbackText?: string,
+): string {
+  if (relevantLogs.length === 0 && fallbackText) {
+    return fallbackText;
+  }
+
+  return relevantLogs
+    .slice(-10) // Show last 10 logs
+    .map((log) => {
+      const time = log.timestamp.toLocaleTimeString();
+      const icon =
+        log.type === "success"
+          ? "✓"
+          : log.type === "error"
+            ? "✗"
+            : log.type === "warning"
+              ? "⚠"
+              : "•";
+      return `${icon} [${time}] ${log.message}`;
+    })
+    .join("\n");
+}
+
 function statusStyles(status: StepStatus) {
   switch (status) {
     case "active":
@@ -190,6 +215,16 @@ export const AgentActivityStream: React.FC<AgentActivityStreamProps> = ({
 
     return isLoading ? Math.max(8, initProgress) : 0;
   }, [initProgress, isInitialized, isLoading, latestInitLog]);
+
+  const bootstrappingLogs = useMemo(
+    () => logs.filter((log) => log.phase === "initialization"),
+    [logs],
+  );
+
+  const thinkingLogs = useMemo(
+    () => logs.filter((log) => log.phase === "generating"),
+    [logs],
+  );
 
   const executionLogs = useMemo(
     () => logs.filter((log) => log.phase === "execution"),
@@ -298,14 +333,9 @@ export const AgentActivityStream: React.FC<AgentActivityStreamProps> = ({
             : "Engine is waiting to initialize.",
         badge: `${Math.round(bootstrappingPercent)}%`,
         progress: bootstrappingPercent,
-        details: JSON.stringify(
-          {
-            latestInitializationLog: latestInitLog?.message ?? null,
-            isLoading,
-            isInitialized,
-          },
-          null,
-          2,
+        details: formatLogsForDisplay(
+          bootstrappingLogs,
+          "No initialization logs yet. Click 'Initialize' to begin.",
         ),
       },
       {
@@ -316,15 +346,11 @@ export const AgentActivityStream: React.FC<AgentActivityStreamProps> = ({
           ? "Listening for audio input and preparing multimodal context."
           : "Audio/OCR listeners are idle.",
         badge: isListening ? "ACTIVE" : "IDLE",
-        details: JSON.stringify(
-          {
-            isListening,
-            voiceError,
-            note: "OCR/audio extraction pipeline hooks can attach here in Phase 4.",
-          },
-          null,
-          2,
-        ),
+        details: voiceError
+          ? `✗ Voice error: ${voiceError}\n\nTry refreshing the page or checking your microphone permissions.`
+          : isListening
+            ? "🎤 Microphone active...\n\nWaiting for voice input. Speak clearly to describe the UI you want to build."
+            : "Microphone is not currently active. Click the microphone icon to start voice mode.",
       },
       {
         key: "thinking",
@@ -338,16 +364,13 @@ export const AgentActivityStream: React.FC<AgentActivityStreamProps> = ({
               : "Awaiting prompt.",
         badge: `${thinkingTokenEstimate} tok`,
         liveMetric: `${thinkingTokenEstimate} tokens`,
-        details: JSON.stringify(
-          {
-            currentPhase,
-            tokenEstimate: thinkingTokenEstimate,
-            generatedCodeChars: generatedCode?.length ?? 0,
-            thinkingSummaryOverride: thinkingSummaryOverride ?? null,
-          },
-          null,
-          2,
-        ),
+        details:
+          currentPhase === "generating" || generatedCode
+            ? formatLogsForDisplay(
+                thinkingLogs,
+                "Thinking logs appear here as code is generated...",
+              )
+            : "Enter a prompt and click Generate to start the thinking process.",
       },
       {
         key: "executing",
@@ -361,16 +384,9 @@ export const AgentActivityStream: React.FC<AgentActivityStreamProps> = ({
               : "Execution pipeline is idle.",
         badge:
           executionLogs.length > 0 ? `${executionLogs.length} logs` : "WAIT",
-        details: JSON.stringify(
-          {
-            executionLogs: executionLogs.slice(-6).map((log) => ({
-              timestamp: log.timestamp,
-              type: log.type,
-              message: log.message,
-            })),
-          },
-          null,
-          2,
+        details: formatLogsForDisplay(
+          executionLogs,
+          "Execution logs will appear here when code is generated and rendering begins.",
         ),
       },
       {
@@ -384,17 +400,9 @@ export const AgentActivityStream: React.FC<AgentActivityStreamProps> = ({
               ? "Last error captured for analysis."
               : "No active runtime errors.",
         badge: latestErrorLog ? "STACK" : "CLEAR",
-        details: JSON.stringify(
-          {
-            latestError: latestErrorLog?.message ?? error ?? null,
-            allRecentErrors: errorLogs.slice(-4).map((log) => ({
-              timestamp: log.timestamp,
-              phase: log.phase,
-              message: log.message,
-            })),
-          },
-          null,
-          2,
+        details: formatLogsForDisplay(
+          errorLogs,
+          "No errors encountered. System running smoothly.",
         ),
       },
       {
@@ -408,22 +416,17 @@ export const AgentActivityStream: React.FC<AgentActivityStreamProps> = ({
               ? `Self-healing has run ${retryCount} time(s).`
               : "Auto-repair loop is standing by.",
         badge: `Attempt ${Math.min(retryCount, 3)}/3`,
-        details: JSON.stringify(
-          {
-            retryCount,
-            fixingLogs: fixingLogs.slice(-4).map((log) => ({
-              timestamp: log.timestamp,
-              message: log.message,
-              type: log.type,
-            })),
-          },
-          null,
-          2,
+        details: formatLogsForDisplay(
+          fixingLogs,
+          retryCount === 0
+            ? "Auto-repair has not been triggered yet."
+            : `Self-healing has corrected ${retryCount} issue(s).`,
         ),
       },
     ];
   }, [
     bootstrappingPercent,
+    bootstrappingLogs,
     currentPhase,
     error,
     errorLogs,
@@ -436,6 +439,7 @@ export const AgentActivityStream: React.FC<AgentActivityStreamProps> = ({
     latestErrorLog,
     latestInitLog,
     retryCount,
+    thinkingLogs,
     thinkingSummaryOverride,
     thinkingTokenEstimate,
     voiceError,

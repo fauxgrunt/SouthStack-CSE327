@@ -61,6 +61,25 @@ export async function detectDeviceCapability(): Promise<
   const deviceMemory = (navigator as { deviceMemory?: number }).deviceMemory;
   const memory = deviceMemory || 4; // GB
 
+  const connection = (
+    navigator as Navigator & {
+      connection?: {
+        saveData?: boolean;
+        effectiveType?: string;
+      };
+    }
+  ).connection;
+
+  const isMobileLike = /Mobi|Android|iPhone|iPad|iPod/i.test(
+    navigator.userAgent || "",
+  );
+  const isDataSaver = Boolean(connection?.saveData);
+  const isVerySlowNetwork = /2g|slow-2g/i.test(connection?.effectiveType || "");
+
+  if (isDataSaver || isVerySlowNetwork || isMobileLike) {
+    return "low";
+  }
+
   // Check GPU tier (if WebGPU available)
   let gpuTier: "low" | "medium" | "high" = "medium";
   const navigatorWithGPU = navigator as typeof navigator & {

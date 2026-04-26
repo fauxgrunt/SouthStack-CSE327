@@ -466,8 +466,24 @@ export const SUPPORTED_LANGUAGES: FileLanguage[] = [
   "css",
 ];
 
-// MODEL_PRESETS - Optimized for 0.5B only deployment
+// MODEL_PRESETS - worker-focused quality tier with fallback
 export const MODEL_PRESETS: ModelConfig[] = [
+  {
+    id: "Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC",
+    name: "Qwen 2.5 Coder 1.5B",
+    size: "1.6GB",
+    vramRequired: 2,
+    contextWindow: 2048,
+    specialization: "code",
+  },
+  {
+    id: "Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC",
+    name: "Qwen 2.5 Coder 3B",
+    size: "3.2GB",
+    vramRequired: 4,
+    contextWindow: 3072,
+    specialization: "code",
+  },
   {
     id: "Qwen2.5-Coder-0.5B-Instruct-q4f16_1-MLC",
     name: "Qwen 2.5 Coder 0.5B",
@@ -476,23 +492,6 @@ export const MODEL_PRESETS: ModelConfig[] = [
     contextWindow: 2048,
     specialization: "code",
   },
-  // Larger models removed for single-model optimized deployment
-  // {
-  //   id: 'Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC',
-  //   name: 'Qwen 2.5 Coder 1.5B',
-  //   size: '1GB',
-  //   vramRequired: 2,
-  //   contextWindow: 2048,
-  //   specialization: 'code',
-  // },
-  // {
-  //   id: 'Llama-3.2-1B-Instruct-q4f16_1-MLC',
-  //   name: 'Llama 3.2 1B',
-  //   size: '600MB',
-  //   vramRequired: 1.5,
-  //   contextWindow: 2048,
-  //   specialization: 'general',
-  // },
 ];
 
 export const DEFAULT_INFERENCE_OPTIONS: InferenceOptions = {

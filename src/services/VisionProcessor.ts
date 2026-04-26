@@ -1,14 +1,28 @@
-interface VisionApiResponse {
-  uiPrompt?: string;
-  description?: string;
-  layoutPrompt?: string;
-  prompt?: string;
-  result?: string;
+interface GeminiApiResponse {
+  candidates?: Array<{
+    content?: {
+      parts?: Array<{
+        text?: string;
+      }>;
+    };
+  }>;
+  error?: {
+    message?: string;
+  };
 }
 
-const DEFAULT_VISION_ENDPOINT = "/api/vision/extract-ui";
+interface VisionLayoutTokens {
+  layout: "sidebar-content" | "topbar-content" | "single-column";
+  contentStyle: "dashboard" | "form" | "catalog" | "marketing" | "mixed";
+  density: "compact" | "comfortable";
+  emphasis: "data" | "action" | "narrative";
+  sections: string[];
+}
+
 const DEFAULT_MAX_DIMENSION = 1280;
 const DEFAULT_MAX_BASE64_BYTES = 1_500_000;
+const GEMINI_FLASH_ENDPOINT =
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
 
 function getBase64Payload(dataUrl: string): string {
   const commaIndex = dataUrl.indexOf(",");
@@ -74,68 +88,187 @@ async function compressBase64Image(
     : imageBase64;
 }
 
-function readVisionPrompt(payload: VisionApiResponse): string | null {
-  const candidates = [
-    payload.uiPrompt,
-    payload.layoutPrompt,
-    payload.prompt,
-    payload.description,
-    payload.result,
-  ];
+function deriveVisionLayoutTokens(prompt: string): VisionLayoutTokens {
+  const lower = prompt.toLowerCase();
 
-  for (const candidate of candidates) {
-    if (typeof candidate === "string" && candidate.trim().length > 0) {
-      return candidate.trim();
-    }
-  }
+  const layout = /sidebar|left nav|navigation rail|drawer/.test(lower)
+    ? "sidebar-content"
+    : /header|top nav|navbar|top bar/.test(lower)
+      ? "topbar-content"
+      : "single-column";
 
-  return null;
+  const contentStyle = /dashboard|metric|analytics|kpi|chart|stat/.test(lower)
+    ? "dashboard"
+    : /form|input|field|signup|login|checkout/.test(lower)
+      ? "form"
+      : /catalog|grid|gallery|table|list|cards/.test(lower)
+        ? "catalog"
+        : /hero|landing|marketing|cta/.test(lower)
+          ? "marketing"
+          : "mixed";
+
+  const density = /dense|compact|tight|many/.test(lower)
+    ? "compact"
+    : "comfortable";
+
+  const emphasis = /button|cta|action|submit|buy|start/.test(lower)
+    ? "action"
+    : /metric|chart|stat|kpi|number/.test(lower)
+      ? "data"
+      : "narrative";
+
+  const sections = Array.from(
+    new Set(
+      [
+        /header|top|hero/.test(lower) ? "header" : null,
+        /sidebar|nav|menu/.test(lower) ? "sidebar" : null,
+        /metric|analytics|kpi|chart|stat/.test(lower) ? "metrics" : null,
+        /form|input|field|signup|login|checkout/.test(lower) ? "form" : null,
+        /table|list|grid|gallery|catalog|cards/.test(lower)
+          ? "content-grid"
+          : null,
+        /footer|legal|copyright/.test(lower) ? "footer" : null,
+      ].filter((v): v is string => Boolean(v)),
+    ),
+  );
+
+  return {
+    layout,
+    contentStyle,
+    density,
+    emphasis,
+    sections: sections.length > 0 ? sections : ["header", "content-grid"],
+  };
 }
 
-function buildFallbackUiPrompt(): string {
+function composeVisionPromptWithTokens(rawPrompt: string): string {
+  const tokens = deriveVisionLayoutTokens(rawPrompt);
+
+  const tokenBlock = [
+    `[LAYOUT TOKENS]`,
+    `layout=${tokens.layout}`,
+    `contentStyle=${tokens.contentStyle}`,
+    `density=${tokens.density}`,
+    `emphasis=${tokens.emphasis}`,
+    `sections=${tokens.sections.join(",")}`,
+    "",
+    `[REFERENCE DESCRIPTION]`,
+    rawPrompt,
+  ].join("\n");
+
+  return tokenBlock;
+}
+
+function buildGeminiVisionPrompt(): string {
   return [
-    "Create a mobile-first React UI that mirrors the attached screenshot/mockup.",
-    "Infer the visual structure, spacing, typography hierarchy, and component grouping from the image.",
-    "Output a polished page with reusable sections, semantic HTML, and responsive behavior for narrow screens.",
-    "Include all visible controls from the design (buttons, inputs, cards, navigation, labels, and helper text).",
+    "Act as a UI layout analyst.",
+    "Extract only the visible structure of the screenshot in simple plain text.",
+    "Return one concise description that names the layout, major regions, and visible components.",
+    "Examples: 'Dashboard with a sidebar, 3 cards across the top, and a primary content table below.'",
+    "Do not output code, markdown, bullets, JSON, or extra commentary.",
   ].join(" ");
 }
 
+function extractGeminiTextResponse(payload: GeminiApiResponse): string | null {
+  const text = payload.candidates
+    ?.flatMap((candidate) => candidate.content?.parts || [])
+    .map((part) => part.text || "")
+    .join("\n")
+    .trim();
+
+  return text && text.length > 0 ? text : null;
+}
+
+function resolveImageMimeType(dataUrl: string): string {
+  const match = dataUrl.match(/^data:([^;]+);base64,/i);
+  return match?.[1] || "image/jpeg";
+}
+
+function getGeminiApiKey(): string {
+  const key = (import.meta.env.VITE_GEMINI_API_KEY || "").trim();
+
+  if (!key) {
+    return "";
+  }
+
+  return key;
+}
+
+function buildFallbackVisionDescription(reason?: string): string {
+  const baseDescription =
+    "Create a mobile-first React interface that mirrors the attached screenshot. Reconstruct layout hierarchy, spacing rhythm, typography scale, and visible controls (buttons, inputs, cards, navigation, labels). Keep structure faithful to the reference and avoid generic template substitutions.";
+
+  const withReason = reason
+    ? `${baseDescription}\n\n[Vision Fallback]\n${reason}`
+    : baseDescription;
+
+  return composeVisionPromptWithTokens(withReason);
+}
+
 export async function extractUIFromImage(imageBase64: string): Promise<string> {
-  const endpoint =
-    import.meta.env.VITE_VISION_API_URL || DEFAULT_VISION_ENDPOINT;
-  const apiKey = import.meta.env.VITE_VISION_API_KEY;
+  const API_KEY = "AIzaSyCpVrx-ZsyYi07eS9UdwNWAQeLfuPLnC3M";
 
   try {
     const compressedImageBase64 = await compressBase64Image(imageBase64);
+    const base64Payload = getBase64Payload(compressedImageBase64);
+    const mimeType = resolveImageMimeType(compressedImageBase64);
+    const endpoint = `${GEMINI_FLASH_ENDPOINT}?key=${encodeURIComponent(API_KEY)}`;
+
     const response = await fetch(endpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
       },
       body: JSON.stringify({
-        imageBase64: compressedImageBase64,
-        task: "extract-ui-layout",
+        contents: [
+          {
+            role: "user",
+            parts: [
+              { text: buildGeminiVisionPrompt() },
+              {
+                inlineData: {
+                  mimeType,
+                  data: base64Payload,
+                },
+              },
+            ],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 1200,
+          candidateCount: 1,
+        },
       }),
     });
 
     if (!response.ok) {
-      throw new Error(`Vision API returned status ${response.status}`);
-    }
-
-    const payload = (await response.json()) as VisionApiResponse;
-    const extractedPrompt = readVisionPrompt(payload);
-
-    if (!extractedPrompt) {
+      const errorText = await response.text().catch(() => "<no error body>");
+      console.error(
+        `❌ [VisionProcessor] Error: Gemini request failed with status ${response.status}. Body: ${errorText}`,
+      );
       throw new Error(
-        "Vision API response did not contain a usable UI prompt.",
+        `Gemini API request failed with status ${response.status}: ${errorText}`,
       );
     }
 
-    return extractedPrompt;
-  } catch {
-    // Fallback keeps the generation flow alive while the API endpoint is stubbed.
-    return buildFallbackUiPrompt();
+    const payload = (await response.json()) as GeminiApiResponse;
+
+    if (payload.error?.message) {
+      throw new Error(`Gemini API error: ${payload.error.message}`);
+    }
+
+    const extractedPrompt = extractGeminiTextResponse(payload);
+
+    if (!extractedPrompt) {
+      throw new Error(
+        "Gemini response did not contain a usable UI description.",
+      );
+    }
+
+    return extractedPrompt.trim();
+  } catch (error) {
+    console.error("[VisionProcessor] Gemini vision call failed", error);
+    throw error;
   }
 }

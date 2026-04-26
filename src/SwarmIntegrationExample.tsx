@@ -53,14 +53,36 @@ export const SwarmExample: React.FC = () => {
     try {
       console.log("[Engine] Initializing WebLLM...");
 
-      const newEngine = await webllm.CreateMLCEngine(
+      const modelCandidates = [
+        "Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC",
+        "Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC",
         "Qwen2.5-Coder-0.5B-Instruct-q4f16_1-MLC",
-        {
-          initProgressCallback: (progress) => {
-            console.log(`[Engine] Loading: ${progress.text}`);
-          },
-        },
-      );
+      ];
+
+      let newEngine: webllm.MLCEngine | null = null;
+      let lastError: unknown = null;
+
+      for (const modelId of modelCandidates) {
+        try {
+          console.log(`[Engine] Attempting model: ${modelId}`);
+          newEngine = await webllm.CreateMLCEngine(modelId, {
+            initProgressCallback: (progress) => {
+              console.log(`[Engine] Loading: ${progress.text}`);
+            },
+          });
+          console.log(`[Engine] Loaded model: ${modelId}`);
+          break;
+        } catch (error) {
+          lastError = error;
+          console.warn(`[Engine] Model failed: ${modelId}`, error);
+        }
+      }
+
+      if (!newEngine) {
+        throw lastError instanceof Error
+          ? lastError
+          : new Error("Failed to initialize any engine candidate");
+      }
 
       engineRef.current = newEngine;
       setEngine(newEngine);

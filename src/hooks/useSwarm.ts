@@ -27,6 +27,7 @@ type SwarmMessageEnvelope = {
     | "TASK_ASSIGN"
     | "TASK_COMPLETE"
     | "STATUS_UPDATE"
+    | "STATE"
     | "PING"
     | "PONG"
     | "DEBUG_ANALYSIS"
@@ -45,6 +46,11 @@ export interface TaskCompletePayload {
   taskId: string;
   fileName: string;
   code: string;
+}
+
+export interface SwarmStatePayload {
+  type: "STATE";
+  state: "ENGINE_READY";
 }
 
 /**
@@ -71,6 +77,11 @@ export const useSwarm = () => {
   const onMasterLostRef = useRef<(() => void) | null>(null);
   const lastPingRef = useRef<number>(Date.now());
   const masterLostNotifiedRef = useRef(false);
+  const isMasterRef = useRef(false);
+
+  useEffect(() => {
+    isMasterRef.current = isMaster;
+  }, [isMaster]);
 
   const normalizeIncomingData = useCallback((rawData: unknown) => {
     console.log("[WEBRTC WORKER] Received data:", rawData);
@@ -294,7 +305,7 @@ export const useSwarm = () => {
     const monitor = setInterval(() => {
       const elapsed = Date.now() - lastPingRef.current;
 
-      if (elapsed <= 15000 || masterLostNotifiedRef.current) {
+      if (elapsed <= 600000 || masterLostNotifiedRef.current) {
         return;
       }
 
@@ -362,10 +373,11 @@ export const useSwarm = () => {
             }
             return [...prev, conn];
           });
-          setIsMaster(options?.asMaster ?? true);
+          const nextMasterState = options?.asMaster ?? isMasterRef.current;
+          setIsMaster(nextMasterState);
           setConnectionStatus("connected");
           masterLostNotifiedRef.current = false;
-          if (options?.asMaster === false) {
+          if (!nextMasterState) {
             setIsMasterHeartbeatHealthy(true);
           }
           resolve(conn);
@@ -375,12 +387,12 @@ export const useSwarm = () => {
           reject(error);
         });
 
-        // Timeout after 10 seconds
+        // Timeout after 10 minutes
         setTimeout(() => {
           if (!conn.open) {
             reject(new Error("Connection timeout"));
           }
-        }, 10000);
+        }, 600000);
       });
     },
     [peerId, connections, setupConnectionHandlers],
@@ -480,6 +492,26 @@ export const useSwarm = () => {
     [],
   );
 
+  const sendStateToNode = useCallback(
+    (conn: DataConnection, payload: SwarmStatePayload) => {
+      if (!conn.open) {
+        return false;
+      }
+
+      try {
+        conn.send(JSON.stringify(payload));
+        return true;
+      } catch (error) {
+        console.warn("[WEBRTC MASTER] Failed to send state payload", {
+          peer: conn.peer,
+          error,
+        });
+        return false;
+      }
+    },
+    [],
+  );
+
   /**
    * Register a custom data handler
    */
@@ -557,5 +589,6 @@ export const useSwarm = () => {
     setWorkerMode,
     disconnectFromNode,
     disconnectAll,
+    sendStateToNode,
   };
 };

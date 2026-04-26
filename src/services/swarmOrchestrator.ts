@@ -237,18 +237,8 @@ REQUIREMENTS:
  *
  * This prompt instructs worker nodes to execute code generation tasks.
  */
-export const WORKER_PROMPT = `You are a Code Generation AI Worker. Your role is to write ONLY the code requested - nothing else.
-
-CRITICAL RULES:
-1. Write ONLY code - no explanations, no markdown, no commentary
-2. Follow the exact instructions provided
-3. Generate production-ready, well-structured code
-4. Include necessary imports and types
-5. Do NOT include markdown code blocks (\`\`\` tags)
-6. Start directly with the code
-7. Consider the shared project context when writing your code
-
-The code you generate will be written directly to a file, so it must be syntactically correct and complete.`;
+export const WORKER_PROMPT =
+  "You are an expert React and Tailwind developer. You will receive a UI description. Output ONLY a single, valid React component that matches the description exactly. Use valid JSX syntax, inline Tailwind CSS classes, and a default export suitable for App.jsx. Do NOT output markdown, explanations, placeholders, or non-React code. Return only raw runnable code.";
 
 /**
  * Build worker prompt with shared context
@@ -496,6 +486,105 @@ export async function executeWorkerTask(
   }
 }
 
+export interface WorkerStreamingCallbacks {
+  onLog?: (message: string) => void;
+  onChunk?: (chunk: string) => void;
+}
+
+function extractStreamContentChunk(payload: unknown): string {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+
+  const candidate = payload as {
+    choices?: Array<{
+      delta?: { content?: string };
+      message?: { content?: string };
+    }>;
+  };
+
+  const choice = candidate.choices?.[0];
+  const delta = choice?.delta?.content;
+  if (typeof delta === "string") {
+    return delta;
+  }
+
+  const message = choice?.message?.content;
+  if (typeof message === "string") {
+    return message;
+  }
+
+  return "";
+}
+
+export async function executeWorkerTaskWithStreaming(
+  taskPayload: SwarmTaskPayload,
+  engine: webllm.MLCEngine,
+  callbacks: WorkerStreamingCallbacks = {},
+): Promise<string> {
+  const emitLog = (message: string) => {
+    callbacks.onLog?.(message);
+    console.log(`[Worker:Stream] ${message}`);
+  };
+
+  emitLog("Task received. Warming up local AI engine...");
+  emitLog("AI Engine active. Allocating GPU memory...");
+  emitLog("Analyzing layout requirements...");
+  emitLog(
+    "Drafting React components and Tailwind styling (this may take a few minutes)...",
+  );
+
+  const systemPrompt = buildWorkerPromptWithContext(taskPayload.sharedContext);
+  const messages = [
+    {
+      role: "system" as const,
+      content: systemPrompt,
+    },
+    {
+      role: "user" as const,
+      content: `File: ${taskPayload.fileName}\n\nInstructions: ${taskPayload.instructions}\n\nGenerate the complete code for this file:`,
+    },
+  ];
+
+  const streamResponse = (await engine.chat.completions.create({
+    messages,
+    temperature: 0.3,
+    max_tokens: 1200,
+    stream: true,
+  })) as unknown;
+
+  let generatedCode = "";
+
+  if (streamResponse && Symbol.asyncIterator in Object(streamResponse)) {
+    for await (const chunkPayload of streamResponse as AsyncIterable<unknown>) {
+      const chunk = extractStreamContentChunk(chunkPayload);
+      if (!chunk) {
+        continue;
+      }
+
+      generatedCode += chunk;
+      callbacks.onChunk?.(chunk);
+    }
+  } else {
+    const singleChunk = extractStreamContentChunk(streamResponse);
+    if (singleChunk) {
+      generatedCode = singleChunk;
+      callbacks.onChunk?.(singleChunk);
+    }
+  }
+
+  const cleanCode = generatedCode
+    .replace(/```[\w]*\n/g, "")
+    .replace(/```/g, "")
+    .trim();
+
+  if (!cleanCode) {
+    throw new Error("Worker stream produced an empty code payload.");
+  }
+
+  return cleanCode;
+}
+
 export async function executeDebugAnalysisTask(
   taskPayload: SwarmTaskPayload,
   engine: webllm.MLCEngine,
@@ -563,7 +652,7 @@ export class SwarmTaskTracker {
     }
   > = new Map();
 
-  private readonly TASK_TIMEOUT_MS = 60000; // 60 seconds
+  private readonly TASK_TIMEOUT_MS = 600000; // 10 minutes
 
   addTask(taskId: string, assignment: TaskAssignment, nodeId: string) {
     this.tasks.set(taskId, {

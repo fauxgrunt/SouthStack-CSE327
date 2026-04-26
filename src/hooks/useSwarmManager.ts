@@ -1,7 +1,12 @@
 import { useEffect, useCallback, useMemo, useRef, useState } from "react";
 import * as webllm from "@mlc-ai/web-llm";
 import type { DataConnection } from "peerjs";
-import { useSwarm, SwarmTaskPayload, TaskCompletePayload } from "./useSwarm";
+import {
+  useSwarm,
+  SwarmTaskPayload,
+  TaskCompletePayload,
+  SwarmStatePayload,
+} from "./useSwarm";
 import {
   createDebugAnalysisPayloadStream,
   DebugSourceFile,
@@ -62,6 +67,37 @@ export interface ImageUiResultMessage {
   error?: string;
 }
 
+export interface WorkerLogMessage {
+  type: "WORKER_LOG";
+  taskId?: string;
+  message: string;
+}
+
+export interface WorkerStreamMessage {
+  type: "WORKER_STREAM";
+  taskId?: string;
+  chunk: string;
+}
+
+export interface WorkerCompleteMessage {
+  type: "WORKER_COMPLETE";
+  taskId?: string;
+  code: string;
+}
+
+interface SwarmRoleSyncMessage {
+  type: "SWARM_ROLE_SYNC";
+  masterPeerId: string;
+  sourceRole: "master" | "worker";
+}
+
+interface SwarmStateSyncMessage {
+  type: "STATE";
+  state: "ENGINE_READY";
+}
+
+type LocalRoleIntent = "auto" | "master" | "worker";
+
 type ImageUiTaskHandler = (
   payload: ImageUiTaskMessage,
   conn: DataConnection,
@@ -74,6 +110,21 @@ type ImageUiStatusHandler = (
 
 type ImageUiResultHandler = (
   payload: ImageUiResultMessage,
+  conn: DataConnection,
+) => void | Promise<void>;
+
+type WorkerLogHandler = (
+  payload: WorkerLogMessage,
+  conn: DataConnection,
+) => void | Promise<void>;
+
+type WorkerStreamHandler = (
+  payload: WorkerStreamMessage,
+  conn: DataConnection,
+) => void | Promise<void>;
+
+type WorkerCompleteHandler = (
+  payload: WorkerCompleteMessage,
   conn: DataConnection,
 ) => void | Promise<void>;
 
@@ -168,6 +219,8 @@ export const useSwarmManager = (
     onMasterLost,
     peerId,
     promoteToMaster,
+    sendStateToNode,
+    setWorkerMode,
     sendTaskToNode,
   } = swarm;
 
@@ -204,10 +257,15 @@ export const useSwarmManager = (
   const inflightPayloadsRef = useRef<Map<string, SwarmTaskPayload>>(new Map());
   const dispatchCursorRef = useRef(0);
   const knownMasterPeerIdRef = useRef<string | null>(null);
+  const localRoleIntentRef = useRef<LocalRoleIntent>("auto");
+  const readyPeerIdsRef = useRef<Set<string>>(new Set());
   const openPeerSetRef = useRef<Set<string>>(new Set());
   const imageUiTaskHandlerRef = useRef<ImageUiTaskHandler | null>(null);
   const imageUiStatusHandlerRef = useRef<ImageUiStatusHandler | null>(null);
   const imageUiResultHandlerRef = useRef<ImageUiResultHandler | null>(null);
+  const workerLogHandlerRef = useRef<WorkerLogHandler | null>(null);
+  const workerStreamHandlerRef = useRef<WorkerStreamHandler | null>(null);
+  const workerCompleteHandlerRef = useRef<WorkerCompleteHandler | null>(null);
   const handleTaskTimeoutRef = useRef<(taskId: string) => Promise<void>>(
     async () => {
       // no-op until callback is initialized
@@ -249,6 +307,59 @@ export const useSwarmManager = (
     [connections, sendMessageToNode],
   );
 
+  const syncSwarmRole = useCallback(
+    (
+      masterPeerId: string,
+      targetPeerId?: string,
+      sourceRole: "master" | "worker" = "master",
+    ) => {
+      if (!masterPeerId.trim()) {
+        return false;
+      }
+
+      const payload: SwarmRoleSyncMessage = {
+        type: "SWARM_ROLE_SYNC",
+        masterPeerId,
+        sourceRole,
+      };
+
+      return sendData(payload, targetPeerId);
+    },
+    [sendData],
+  );
+
+  const getReadyWorkerConnections = useCallback(() => {
+    return connections.filter(
+      (conn) => conn.open && readyPeerIdsRef.current.has(conn.peer),
+    );
+  }, [connections]);
+
+  const sendImageUiTask = useCallback(
+    (payload: ImageUiTaskMessage) => {
+      const readyConnections = getReadyWorkerConnections();
+
+      if (readyConnections.length === 0) {
+        console.warn(
+          "[SwarmManager] No ENGINE_READY worker available for image task dispatch",
+          {
+            connectedPeers: connections
+              .filter((conn) => conn.open)
+              .map((conn) => conn.peer),
+            readyPeers: Array.from(readyPeerIdsRef.current),
+          },
+        );
+        return false;
+      }
+
+      return sendMessageToNode(readyConnections[0], payload);
+    },
+    [connections, getReadyWorkerConnections, sendMessageToNode],
+  );
+
+  const setLocalRoleIntent = useCallback((intent: LocalRoleIntent) => {
+    localRoleIntentRef.current = intent;
+  }, []);
+
   const onImageUiTask = useCallback((handler: ImageUiTaskHandler | null) => {
     imageUiTaskHandlerRef.current = handler;
   }, []);
@@ -263,6 +374,21 @@ export const useSwarmManager = (
   const onImageUiResult = useCallback(
     (handler: ImageUiResultHandler | null) => {
       imageUiResultHandlerRef.current = handler;
+    },
+    [],
+  );
+
+  const onWorkerLog = useCallback((handler: WorkerLogHandler | null) => {
+    workerLogHandlerRef.current = handler;
+  }, []);
+
+  const onWorkerStream = useCallback((handler: WorkerStreamHandler | null) => {
+    workerStreamHandlerRef.current = handler;
+  }, []);
+
+  const onWorkerComplete = useCallback(
+    (handler: WorkerCompleteHandler | null) => {
+      workerCompleteHandlerRef.current = handler;
     },
     [],
   );
@@ -1161,80 +1287,156 @@ export const useSwarmManager = (
     handleWorkerDataRef.current = handleWorkerData;
   }, [handleWorkerData]);
 
-  const handleSwarmData = useCallback((data: unknown, conn: DataConnection) => {
-    const mode = swarmModeRef.current;
+  const handleSwarmData = useCallback(
+    (data: unknown, conn: DataConnection) => {
+      const mode = swarmModeRef.current;
 
-    if (typeof data === "object" && data !== null && "type" in data) {
-      const typed = data as { type?: string; payload?: unknown };
+      if (typeof data === "object" && data !== null && "type" in data) {
+        const typed = data as { type?: string; payload?: unknown };
 
-      if (typed.type === "TASK_DISPATCH" && typed.payload) {
-        console.log("[SwarmManager] Routing TASK_DISPATCH to worker handler");
-        void handleWorkerDataRef.current(typed.payload, conn);
+        if (typed.type === "TASK_DISPATCH" && typed.payload) {
+          console.log("[SwarmManager] Routing TASK_DISPATCH to worker handler");
+          void handleWorkerDataRef.current(typed.payload, conn);
+          return;
+        }
+
+        if (typed.type === "STATE") {
+          const stateMessage = typed as SwarmStateSyncMessage;
+
+          if (stateMessage.state === "ENGINE_READY") {
+            readyPeerIdsRef.current.add(conn.peer);
+            console.log("[SwarmManager] Marked peer as ENGINE_READY", {
+              peer: conn.peer,
+              readyPeers: Array.from(readyPeerIdsRef.current),
+            });
+          }
+
+          return;
+        }
+
+        if (typed.type === "SWARM_ROLE_SYNC") {
+          const roleSync = typed as SwarmRoleSyncMessage;
+
+          if (!roleSync.masterPeerId || !peerId) {
+            return;
+          }
+
+          knownMasterPeerIdRef.current = roleSync.masterPeerId;
+
+          if (roleSync.masterPeerId === peerId) {
+            if (localRoleIntentRef.current === "worker") {
+              setWorkerMode();
+              return;
+            }
+
+            if (roleSync.sourceRole === "master") {
+              promoteToMaster();
+            }
+          } else {
+            setWorkerMode();
+          }
+
+          return;
+        }
+
+        if (typed.type === "IMAGE_UI_TASK" && imageUiTaskHandlerRef.current) {
+          void imageUiTaskHandlerRef.current(typed as ImageUiTaskMessage, conn);
+          return;
+        }
+
+        if (
+          typed.type === "IMAGE_UI_STATUS" &&
+          imageUiStatusHandlerRef.current
+        ) {
+          void imageUiStatusHandlerRef.current(
+            typed as ImageUiStatusMessage,
+            conn,
+          );
+          return;
+        }
+
+        if (
+          typed.type === "IMAGE_UI_RESULT" &&
+          imageUiResultHandlerRef.current
+        ) {
+          void imageUiResultHandlerRef.current(
+            typed as ImageUiResultMessage,
+            conn,
+          );
+          return;
+        }
+
+        if (typed.type === "WORKER_LOG" && workerLogHandlerRef.current) {
+          void workerLogHandlerRef.current(typed as WorkerLogMessage, conn);
+          return;
+        }
+
+        if (typed.type === "WORKER_STREAM" && workerStreamHandlerRef.current) {
+          void workerStreamHandlerRef.current(
+            typed as WorkerStreamMessage,
+            conn,
+          );
+          return;
+        }
+
+        if (
+          typed.type === "WORKER_COMPLETE" &&
+          workerCompleteHandlerRef.current
+        ) {
+          void workerCompleteHandlerRef.current(
+            typed as WorkerCompleteMessage,
+            conn,
+          );
+          return;
+        }
+
+        if (typed.type === "TASK_ASSIGN") {
+          console.log("[SwarmManager] Routing TASK_ASSIGN to worker handler");
+          void handleWorkerDataRef.current(typed, conn);
+          return;
+        }
+
+        if (typed.type === "DEBUG_ANALYSIS") {
+          console.log(
+            "[SwarmManager] Routing DEBUG_ANALYSIS to worker handler",
+          );
+          void handleWorkerDataRef.current(typed, conn);
+          return;
+        }
+
+        if (typed.type === "SWARM_STATE_SYNC") {
+          console.log(
+            "[SwarmManager] Routing SWARM_STATE_SYNC to worker handler",
+          );
+          void handleWorkerDataRef.current(typed, conn);
+          return;
+        }
+
+        if (
+          typed.type === "TASK_COMPLETE" ||
+          typed.type === "STATUS_UPDATE" ||
+          typed.type === "DEBUG_ANALYSIS_RESULT" ||
+          typed.type === "DEBUG_REQUEST_NEXT"
+        ) {
+          console.log(
+            "[SwarmManager] Routing response/update to master handler",
+          );
+          void handleMasterDataRef.current(typed, conn);
+          return;
+        }
+      }
+
+      if (mode === "master") {
+        void handleMasterDataRef.current(data, conn);
         return;
       }
 
-      if (typed.type === "IMAGE_UI_TASK" && imageUiTaskHandlerRef.current) {
-        void imageUiTaskHandlerRef.current(typed as ImageUiTaskMessage, conn);
-        return;
+      if (mode === "worker") {
+        void handleWorkerDataRef.current(data, conn);
       }
-
-      if (typed.type === "IMAGE_UI_STATUS" && imageUiStatusHandlerRef.current) {
-        void imageUiStatusHandlerRef.current(
-          typed as ImageUiStatusMessage,
-          conn,
-        );
-        return;
-      }
-
-      if (typed.type === "IMAGE_UI_RESULT" && imageUiResultHandlerRef.current) {
-        void imageUiResultHandlerRef.current(
-          typed as ImageUiResultMessage,
-          conn,
-        );
-        return;
-      }
-
-      if (typed.type === "TASK_ASSIGN") {
-        console.log("[SwarmManager] Routing TASK_ASSIGN to worker handler");
-        void handleWorkerDataRef.current(typed, conn);
-        return;
-      }
-
-      if (typed.type === "DEBUG_ANALYSIS") {
-        console.log("[SwarmManager] Routing DEBUG_ANALYSIS to worker handler");
-        void handleWorkerDataRef.current(typed, conn);
-        return;
-      }
-
-      if (typed.type === "SWARM_STATE_SYNC") {
-        console.log(
-          "[SwarmManager] Routing SWARM_STATE_SYNC to worker handler",
-        );
-        void handleWorkerDataRef.current(typed, conn);
-        return;
-      }
-
-      if (
-        typed.type === "TASK_COMPLETE" ||
-        typed.type === "STATUS_UPDATE" ||
-        typed.type === "DEBUG_ANALYSIS_RESULT" ||
-        typed.type === "DEBUG_REQUEST_NEXT"
-      ) {
-        console.log("[SwarmManager] Routing response/update to master handler");
-        void handleMasterDataRef.current(typed, conn);
-        return;
-      }
-    }
-
-    if (mode === "master") {
-      void handleMasterDataRef.current(data, conn);
-      return;
-    }
-
-    if (mode === "worker") {
-      void handleWorkerDataRef.current(data, conn);
-    }
-  }, []);
+    },
+    [peerId, promoteToMaster, setWorkerMode],
+  );
 
   /**
    * Register one stable data handler and route by latest mode
@@ -1295,6 +1497,31 @@ export const useSwarmManager = (
       clearInterval(interval);
     };
   }, [connections, distributedTasks, swarmMode]);
+
+  useEffect(() => {
+    if (swarmMode !== "worker" || !engine) {
+      return;
+    }
+
+    const readyMessage: SwarmStatePayload = {
+      type: "STATE",
+      state: "ENGINE_READY",
+    };
+
+    connections.forEach((conn) => {
+      if (!conn.open || readyPeerIdsRef.current.has(conn.peer)) {
+        return;
+      }
+
+      const sent = sendStateToNode(conn, readyMessage);
+      if (sent) {
+        readyPeerIdsRef.current.add(conn.peer);
+        console.log("[SwarmManager] Broadcast ENGINE_READY", {
+          peer: conn.peer,
+        });
+      }
+    });
+  }, [connections, engine, sendStateToNode, swarmMode]);
 
   useEffect(() => {
     const currentOpenPeers = new Set(
@@ -1414,8 +1641,51 @@ export const useSwarmManager = (
     sendTaskToNode,
   ]);
 
+  const electNextMasterPeer = useCallback(
+    (candidatePeerIds: string[], previousMasterPeerId?: string | null) => {
+      const sortedCandidates = Array.from(new Set(candidatePeerIds)).sort(
+        (a, b) => a.localeCompare(b),
+      );
+
+      if (sortedCandidates.length === 0) {
+        return null;
+      }
+
+      if (!previousMasterPeerId) {
+        return sortedCandidates[0];
+      }
+
+      const previousIndex = sortedCandidates.indexOf(previousMasterPeerId);
+      if (previousIndex === -1) {
+        return sortedCandidates[0];
+      }
+
+      const nextIndex = (previousIndex + 1) % sortedCandidates.length;
+      return sortedCandidates[nextIndex];
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (swarmMode === "master" && peerId) {
+      knownMasterPeerIdRef.current = peerId;
+    }
+  }, [peerId, swarmMode]);
+
   useEffect(() => {
     onMasterLost(() => {
+      if (localRoleIntentRef.current === "worker") {
+        console.warn(
+          "[SwarmManager] Master heartbeat lost while pinned to worker mode; waiting for external master",
+          {
+            peerId,
+            knownMaster: knownMasterPeerIdRef.current,
+          },
+        );
+        setWorkerMode();
+        return;
+      }
+
       const payload = {
         savedAt: Date.now(),
         activeTaskId: activeTaskRef.current,
@@ -1432,10 +1702,8 @@ export const useSwarmManager = (
         ...(peerId ? [peerId] : []),
         ...connections.filter((conn) => conn.open).map((conn) => conn.peer),
       ];
-      const uniqueCandidates = Array.from(new Set(candidates)).sort((a, b) =>
-        a.localeCompare(b),
-      );
-      const electedMaster = uniqueCandidates[0] ?? peerId;
+      const electedMaster =
+        electNextMasterPeer(candidates, knownMasterPeerIdRef.current) ?? peerId;
 
       if (!electedMaster || !peerId) {
         return;
@@ -1473,10 +1741,12 @@ export const useSwarmManager = (
     });
   }, [
     connections,
+    electNextMasterPeer,
     onMasterLost,
     peerId,
     promoteToMaster,
     recoverAsElectedMaster,
+    setWorkerMode,
   ]);
 
   /**
@@ -1667,9 +1937,15 @@ export const useSwarmManager = (
     // Custom message hooks
     sendMessageToNode,
     sendData,
+    syncSwarmRole,
+    sendImageUiTask,
+    setLocalRoleIntent,
     onImageUiTask,
     onImageUiStatus,
     onImageUiResult,
+    onWorkerLog,
+    onWorkerStream,
+    onWorkerComplete,
 
     // Standalone/Worker functions
     executeLocalTask,

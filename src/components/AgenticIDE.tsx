@@ -25,6 +25,9 @@ import { useAgenticLoop } from "../hooks/useAgenticLoop";
 import type { ImageUiTaskMessage } from "../hooks/useSwarmManager";
 import { useSwarmManager } from "../hooks/useSwarmManager";
 import { useVoiceInput } from "../hooks/useVoiceInput";
+import { buildSimpleLayoutComponentCode } from "./SimpleLayoutGenerator";
+import type { SwarmTaskPayload } from "../hooks/useSwarm";
+import { executeWorkerTaskWithStreaming } from "../services/swarmOrchestrator";
 import { extractUIFromImage } from "../services/VisionProcessor";
 import { limitArraySize } from "../utils/performance";
 import { AgentActivityStream } from "./AgentActivityStream";
@@ -34,6 +37,15 @@ import { SwarmConnectWidget } from "./SwarmConnectWidget";
 type ActiveTab = "preview" | "code";
 
 const MAX_SWARM_LOGS = 200;
+const GENERIC_TEMPLATE_MARKERS = [
+  "visual fidelity target",
+  "prompt-aligned layout",
+  "fast reference-based preview while full generation completes.",
+  "generated ui",
+  "overview",
+  "detail panel",
+  "recent activity",
+];
 
 interface ChatMessage {
   id: string;
@@ -46,6 +58,35 @@ interface SwarmActivityLog {
   id: string;
   timestamp: Date;
   message: string;
+}
+
+function looksLikeGenericTemplatePayload(code: string): boolean {
+  const normalized = code.toLowerCase();
+  const hitCount = GENERIC_TEMPLATE_MARKERS.filter((marker) =>
+    normalized.includes(marker),
+  ).length;
+  return hitCount >= 2;
+}
+
+function sanitizeDistributedWorkerCode(code: string): string {
+  const withoutFences = code
+    .replace(/```(?:jsx|tsx|js|ts)?/gi, "")
+    .replace(/```/g, "")
+    .trim();
+
+  const lines = withoutFences.split(/\r?\n/);
+  const safeImportPattern =
+    /^\s*import\s+.+from\s+["'](react|\.\/styles\.css|\.\/App\.css)["'];?\s*$/i;
+
+  const sanitizedLines = lines.filter((line) => {
+    if (!/^\s*import\s+/i.test(line)) {
+      return true;
+    }
+
+    return safeImportPattern.test(line);
+  });
+
+  return sanitizedLines.join("\n").trim();
 }
 
 export const AgenticIDE: React.FC = () => {
@@ -82,13 +123,17 @@ export const AgenticIDE: React.FC = () => {
   const [isAnalyzingImage, setIsAnalyzingImage] = useState(false);
   const [multimodalError, setMultimodalError] = useState<string | null>(null);
   const [copiedCodeId, setCopiedCodeId] = useState<string | null>(null);
+  const [workerTerminalLines, setWorkerTerminalLines] = useState<string[]>([]);
+  const [workerStreamPreview, setWorkerStreamPreview] = useState("");
 
   const [isLogsExpanded, setIsLogsExpanded] = useState(false);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const activeDistributedTaskRef = useRef<string | null>(null);
+  const activeDistributedPromptRef = useRef<string>("");
   const isProcessingImageRef = useRef(false);
+  const workerTerminalRef = useRef<HTMLDivElement | null>(null);
 
   const handleCopyCode = useCallback(async () => {
     if (!canvasCode) return;
@@ -135,6 +180,22 @@ export const AgenticIDE: React.FC = () => {
       return limitArraySize(newLogs, MAX_SWARM_LOGS);
     });
   }, []);
+
+  const appendWorkerTerminalLine = useCallback((line: string) => {
+    const timestamp = new Date().toLocaleTimeString();
+    setWorkerTerminalLines((prev) =>
+      limitArraySize([...prev, `[${timestamp}] ${line}`], 600),
+    );
+  }, []);
+
+  useEffect(() => {
+    if (!workerTerminalRef.current) {
+      return;
+    }
+
+    workerTerminalRef.current.scrollTop =
+      workerTerminalRef.current.scrollHeight;
+  }, [workerStreamPreview, workerTerminalLines]);
 
   const peerStatus = useMemo(() => {
     const connected =
@@ -294,6 +355,9 @@ export const AgenticIDE: React.FC = () => {
       const taskId = `p2p_ui_${Date.now()}`;
       activeDistributedTaskRef.current = taskId;
       setIsDistributedProcessing(true);
+      setWorkerTerminalLines([]);
+      setWorkerStreamPreview("");
+      appendWorkerTerminalLine("Master queued distributed image task.");
 
       const distributedPrompt = trimmed;
       let imageDescription: string | undefined;
@@ -305,12 +369,27 @@ export const AgenticIDE: React.FC = () => {
           appendSwarmLog(
             "[Swarm] Master: Image converted to textual UI description.",
           );
+          appendWorkerTerminalLine("Gemini structure extraction complete.");
         } catch (error) {
           const message =
             error instanceof Error
               ? error.message
               : "Image analysis failed unexpectedly.";
           setMultimodalError(`Image analysis failed: ${message}`);
+          setIsDistributedProcessing(false);
+          activeDistributedTaskRef.current = null;
+          setChatHistory((prev) => [
+            ...prev,
+            {
+              id: `assistant_${Date.now()}_image_analysis_failed`,
+              role: "assistant",
+              content:
+                "Image analysis failed. Task was not dispatched to workers. Fix Vision API and retry.",
+              timestamp: new Date(),
+            },
+          ]);
+          appendWorkerTerminalLine(`Image analysis failed: ${message}`);
+          return;
         } finally {
           setIsAnalyzingImage(false);
         }
@@ -324,13 +403,19 @@ export const AgenticIDE: React.FC = () => {
         imageName: attachedImageName ?? undefined,
       };
 
-      appendSwarmLog("[Swarm] Master: Offloading prompt to Worker node...");
+      activeDistributedPromptRef.current =
+        imageDescription || distributedPrompt;
 
-      const sent = swarmManager.sendData(payload);
+      appendSwarmLog("[Swarm] Master: Offloading prompt to Worker node...");
+      appendWorkerTerminalLine("Dispatching structure prompt to worker...");
+
+      const sent = swarmManager.sendImageUiTask(payload);
       if (!sent) {
         setIsDistributedProcessing(false);
         activeDistributedTaskRef.current = null;
-        setMultimodalError("No open worker channel available for offload.");
+        setMultimodalError(
+          "No ENGINE_READY worker channel is available for offload.",
+        );
         setChatHistory((prev) => [
           ...prev,
           {
@@ -341,6 +426,9 @@ export const AgenticIDE: React.FC = () => {
             timestamp: new Date(),
           },
         ]);
+        appendWorkerTerminalLine(
+          "Dispatch failed: no ENGINE_READY worker channel available.",
+        );
       } else {
         setChatHistory((prev) => [
           ...prev,
@@ -352,6 +440,9 @@ export const AgenticIDE: React.FC = () => {
             timestamp: new Date(),
           },
         ]);
+        appendWorkerTerminalLine(
+          "Task dispatched. Waiting for worker stream...",
+        );
       }
 
       setAttachedImageDataUrl(null);
@@ -359,26 +450,37 @@ export const AgenticIDE: React.FC = () => {
       return;
     }
 
-    let finalPrompt = trimmed;
-
     if (attachedImageDataUrl) {
       setIsAnalyzingImage(true);
       try {
         const extractedUiPrompt =
           await extractUIFromImage(attachedImageDataUrl);
-        finalPrompt = [
-          trimmed,
-          "",
-          "[IMAGE ANALYSIS REQUIREMENTS]",
-          extractedUiPrompt,
-        ].join("\n");
+        const generatedCode = buildSimpleLayoutComponentCode(extractedUiPrompt);
 
         setChatHistory((prev) => [
           ...prev,
           {
             id: `assistant_${Date.now()}_image_context`,
             role: "assistant",
-            content: "Image context extracted. Generating UI...",
+            content:
+              "Image context extracted. Rendering safe layout preview...",
+            timestamp: new Date(),
+          },
+        ]);
+
+        const previewResult = await executeGeneratedCodeDirectly(
+          generatedCode,
+          extractedUiPrompt,
+        );
+
+        setChatHistory((prev) => [
+          ...prev,
+          {
+            id: `assistant_${Date.now()}_safe_mode_result`,
+            role: "assistant",
+            content: previewResult.success
+              ? "Safe mode preview rendered successfully."
+              : `Safe mode preview failed: ${previewResult.error || "Unknown error."}`,
             timestamp: new Date(),
           },
         ]);
@@ -388,12 +490,26 @@ export const AgenticIDE: React.FC = () => {
             ? error.message
             : "Image analysis failed unexpectedly.";
         setMultimodalError(`Image analysis failed: ${message}`);
+        setChatHistory((prev) => [
+          ...prev,
+          {
+            id: `assistant_${Date.now()}_image_analysis_failed_local`,
+            role: "assistant",
+            content:
+              "Image analysis failed. Generation was cancelled to prevent generic fallback output.",
+            timestamp: new Date(),
+          },
+        ]);
       } finally {
         setIsAnalyzingImage(false);
       }
+
+      setAttachedImageDataUrl(null);
+      setAttachedImageName(null);
+      return;
     }
 
-    const result = await executeAgenticLoop(finalPrompt);
+    const result = await executeAgenticLoop(trimmed);
 
     if (result && typeof result === "object" && "success" in result) {
       if (result.success && "code" in result && result.code) {
@@ -424,6 +540,98 @@ export const AgenticIDE: React.FC = () => {
       }
     });
 
+    swarmManager.onWorkerLog((payload) => {
+      if (swarmManager.swarmMode !== "master") {
+        return;
+      }
+
+      if (!activeDistributedTaskRef.current) {
+        return;
+      }
+
+      if (
+        payload.taskId &&
+        payload.taskId !== activeDistributedTaskRef.current
+      ) {
+        return;
+      }
+
+      appendSwarmLog(`[Worker] ${payload.message}`);
+      appendWorkerTerminalLine(payload.message);
+    });
+
+    swarmManager.onWorkerStream((payload) => {
+      if (swarmManager.swarmMode !== "master") {
+        return;
+      }
+
+      if (!activeDistributedTaskRef.current) {
+        return;
+      }
+
+      if (
+        payload.taskId &&
+        payload.taskId !== activeDistributedTaskRef.current
+      ) {
+        return;
+      }
+
+      setWorkerStreamPreview((prev) => {
+        const next = `${prev}${payload.chunk}`;
+        return next.length > 120000 ? next.slice(next.length - 120000) : next;
+      });
+    });
+
+    swarmManager.onWorkerComplete(async (payload) => {
+      if (swarmManager.swarmMode !== "master") {
+        return;
+      }
+
+      if (!activeDistributedTaskRef.current) {
+        return;
+      }
+
+      if (
+        payload.taskId &&
+        payload.taskId !== activeDistributedTaskRef.current
+      ) {
+        return;
+      }
+
+      setIsDistributedProcessing(false);
+      activeDistributedTaskRef.current = null;
+
+      const safeCode = sanitizeDistributedWorkerCode(payload.code);
+      if (!safeCode.trim()) {
+        const message = "Worker returned empty code after sanitization.";
+        setMultimodalError(message);
+        appendWorkerTerminalLine(message);
+        return;
+      }
+
+      appendWorkerTerminalLine(
+        "Worker stream complete. Executing sanitized code...",
+      );
+      setCanvasCode(safeCode);
+
+      const previewResult = await executeGeneratedCodeDirectly(
+        safeCode,
+        activeDistributedPromptRef.current || "distributed streamed task",
+      );
+
+      setChatHistory((prev) => [
+        ...prev,
+        {
+          id: `assistant_${Date.now()}_distributed_complete`,
+          role: "assistant",
+          content: previewResult.success
+            ? "Worker returned code successfully. Preview updated."
+            : `Worker returned code, but preview failed: ${previewResult.error || "Unknown error."}`,
+          timestamp: new Date(),
+        },
+      ]);
+    });
+
     swarmManager.onImageUiTask(async (payload, conn) => {
       if (swarmManager.swarmMode !== "worker") {
         return;
@@ -441,54 +649,95 @@ export const AgenticIDE: React.FC = () => {
 
       try {
         if (!engine) {
-          throw new Error("Worker engine is not initialized.");
-        }
-
-        let workerPrompt = payload.prompt;
-
-        if (payload.imageDescription) {
-          sendStatus("Applying image description context...");
-          workerPrompt = [
-            payload.prompt,
-            "",
-            "[IMAGE ANALYSIS REQUIREMENTS]",
-            payload.imageDescription,
-          ].join("\n");
-        } else if (payload.imageBase64) {
-          // Backward compatibility with older masters that still send base64 payloads.
-          sendStatus("Analyzing image reference...");
-          const extractedUiPrompt = await extractUIFromImage(
-            payload.imageBase64,
-          );
-          workerPrompt = [
-            payload.prompt,
-            "",
-            "[IMAGE ANALYSIS REQUIREMENTS]",
-            extractedUiPrompt,
-          ].join("\n");
-        }
-
-        sendStatus("Generating UI code...");
-        const distributedResult = await executeAgenticLoop(workerPrompt);
-
-        if (!distributedResult?.success || !distributedResult.code) {
           throw new Error(
-            distributedResult?.error ||
-              "Worker failed to generate a valid code payload.",
+            "Worker engine unavailable. Initialize WebLLM on the worker before accepting IMAGE_UI_TASK.",
+          );
+        }
+
+        let layoutDescription = payload.imageDescription?.trim() || "";
+
+        if (!layoutDescription && payload.imageBase64) {
+          sendStatus("Analyzing image reference...");
+          layoutDescription = await extractUIFromImage(payload.imageBase64);
+        }
+
+        if (!layoutDescription) {
+          layoutDescription = payload.prompt.trim();
+        }
+
+        if (!layoutDescription) {
+          throw new Error(
+            "No structural description was provided for safe-mode rendering.",
+          );
+        }
+
+        const emitWorkerLog = (message: string) => {
+          swarmManager.sendMessageToNode(conn, {
+            type: "WORKER_LOG",
+            message,
+          });
+        };
+
+        const emitWorkerChunk = (chunk: string) => {
+          if (!chunk) {
+            return;
+          }
+
+          swarmManager.sendMessageToNode(conn, {
+            type: "WORKER_STREAM",
+            chunk,
+          });
+        };
+
+        const taskPayload: SwarmTaskPayload = {
+          type: "TASK_ASSIGN",
+          taskId: payload.taskId,
+          fileName: "src/App.jsx",
+          instructions: [
+            payload.prompt.trim(),
+            "",
+            "[STRUCTURAL DESCRIPTION]",
+            layoutDescription,
+            "",
+            "Build a faithful React + Tailwind implementation from this structure.",
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        };
+
+        const generatedCode = await executeWorkerTaskWithStreaming(
+          taskPayload,
+          engine,
+          {
+            onLog: emitWorkerLog,
+            onChunk: emitWorkerChunk,
+          },
+        );
+
+        if (!generatedCode.trim()) {
+          throw new Error("Worker returned an empty code payload.");
+        }
+
+        if (looksLikeGenericTemplatePayload(generatedCode)) {
+          throw new Error(
+            "Worker returned a generic template payload; refusing to forward result.",
           );
         }
 
         swarmManager.sendMessageToNode(conn, {
-          type: "IMAGE_UI_RESULT",
-          taskId: payload.taskId,
-          prompt: workerPrompt,
-          code: distributedResult.code,
+          type: "WORKER_COMPLETE",
+          code: generatedCode,
         });
       } catch (error) {
         const message =
           error instanceof Error
             ? error.message
             : "Worker execution failed unexpectedly.";
+
+        swarmManager.sendMessageToNode(conn, {
+          type: "WORKER_LOG",
+          message: `Worker failed: ${message}`,
+        });
 
         swarmManager.sendMessageToNode(conn, {
           type: "IMAGE_UI_RESULT",
@@ -551,11 +800,14 @@ export const AgenticIDE: React.FC = () => {
       swarmManager.onImageUiTask(null);
       swarmManager.onImageUiStatus(null);
       swarmManager.onImageUiResult(null);
+      swarmManager.onWorkerLog(null);
+      swarmManager.onWorkerStream(null);
+      swarmManager.onWorkerComplete(null);
     };
   }, [
     appendSwarmLog,
+    appendWorkerTerminalLine,
     engine,
-    executeAgenticLoop,
     executeGeneratedCodeDirectly,
     swarmManager,
   ]);
@@ -572,22 +824,40 @@ export const AgenticIDE: React.FC = () => {
       setIsConnectingPeer(true);
 
       try {
+        const trimmedTargetPeerId = targetPeerId.trim();
+        if (!trimmedTargetPeerId) {
+          throw new Error(
+            "Peer ID is required for both Master and Worker connection.",
+          );
+        }
+
         if (role === "worker") {
-          if (!targetPeerId.trim()) {
-            swarmManager.setWorkerMode();
-          } else {
-            await swarmManager.connectToNode(targetPeerId, { asMaster: false });
-            swarmManager.setWorkerMode();
-          }
+          swarmManager.setLocalRoleIntent("worker");
+          await swarmManager.connectToNode(trimmedTargetPeerId, {
+            asMaster: false,
+          });
+          swarmManager.setWorkerMode();
+          swarmManager.syncSwarmRole(
+            trimmedTargetPeerId,
+            trimmedTargetPeerId,
+            "worker",
+          );
           return;
         }
 
-        if (!targetPeerId.trim()) {
-          throw new Error("Peer ID is required when joining as master.");
-        }
-
-        await swarmManager.connectToNode(targetPeerId, { asMaster: true });
+        swarmManager.setLocalRoleIntent("master");
+        await swarmManager.connectToNode(trimmedTargetPeerId, {
+          asMaster: true,
+        });
         swarmManager.promoteToMaster();
+
+        if (swarmManager.peerId) {
+          swarmManager.syncSwarmRole(
+            swarmManager.peerId,
+            trimmedTargetPeerId,
+            "master",
+          );
+        }
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "Failed to connect.";
@@ -864,7 +1134,40 @@ export const AgenticIDE: React.FC = () => {
                   exit={{ opacity: 0, y: -6 }}
                   className="h-full overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950"
                 >
-                  {state.previewUrl ? (
+                  {isDistributedProcessing ? (
+                    <div className="flex h-full flex-col">
+                      <div className="border-b border-zinc-800 bg-zinc-900/70 px-4 py-3">
+                        <p className="text-xs uppercase tracking-[0.2em] text-emerald-300">
+                          Distributed Worker Status Console
+                        </p>
+                        <p className="mt-1 text-[11px] text-zinc-400">
+                          Live worker telemetry and streamed code output
+                        </p>
+                      </div>
+                      <div
+                        ref={workerTerminalRef}
+                        className="h-full overflow-y-auto bg-black px-4 py-3 font-mono text-[11px] leading-5 text-emerald-300"
+                      >
+                        {workerTerminalLines.length === 0 &&
+                          workerStreamPreview.length === 0 && (
+                            <p className="text-zinc-500">
+                              Waiting for worker logs...
+                            </p>
+                          )}
+                        {workerTerminalLines.map((line, index) => (
+                          <p key={`worker-log-${index}`}>{line}</p>
+                        ))}
+                        {workerStreamPreview && (
+                          <>
+                            <p className="mt-3 text-cyan-300">--- STREAM ---</p>
+                            <pre className="whitespace-pre-wrap break-words text-zinc-300">
+                              {workerStreamPreview}
+                            </pre>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  ) : state.previewUrl ? (
                     <iframe
                       title="SouthStack Live Preview"
                       src={state.previewUrl}
