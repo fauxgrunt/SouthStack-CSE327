@@ -184,27 +184,6 @@ function resolveImageMimeType(dataUrl: string): string {
   return match?.[1] || "image/jpeg";
 }
 
-function getGeminiApiKey(): string {
-  const key = (import.meta.env.VITE_GEMINI_API_KEY || "").trim();
-
-  if (!key) {
-    return "";
-  }
-
-  return key;
-}
-
-function buildFallbackVisionDescription(reason?: string): string {
-  const baseDescription =
-    "Create a mobile-first React interface that mirrors the attached screenshot. Reconstruct layout hierarchy, spacing rhythm, typography scale, and visible controls (buttons, inputs, cards, navigation, labels). Keep structure faithful to the reference and avoid generic template substitutions.";
-
-  const withReason = reason
-    ? `${baseDescription}\n\n[Vision Fallback]\n${reason}`
-    : baseDescription;
-
-  return composeVisionPromptWithTokens(withReason);
-}
-
 export async function extractUIFromImage(imageBase64: string): Promise<string> {
   const API_KEY = "AIzaSyCpVrx-ZsyYi07eS9UdwNWAQeLfuPLnC3M";
 
