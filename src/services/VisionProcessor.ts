@@ -11,14 +11,6 @@ interface GeminiApiResponse {
   };
 }
 
-interface VisionLayoutTokens {
-  layout: "sidebar-content" | "topbar-content" | "single-column";
-  contentStyle: "dashboard" | "form" | "catalog" | "marketing" | "mixed";
-  density: "compact" | "comfortable";
-  emphasis: "data" | "action" | "narrative";
-  sections: string[];
-}
-
 const DEFAULT_MAX_DIMENSION = 1280;
 const DEFAULT_MAX_BASE64_BYTES = 1_500_000;
 const GEMINI_FLASH_ENDPOINT =
@@ -86,77 +78,6 @@ async function compressBase64Image(
   return estimateBase64Bytes(compressed) < estimateBase64Bytes(imageBase64)
     ? compressed
     : imageBase64;
-}
-
-function deriveVisionLayoutTokens(prompt: string): VisionLayoutTokens {
-  const lower = prompt.toLowerCase();
-
-  const layout = /sidebar|left nav|navigation rail|drawer/.test(lower)
-    ? "sidebar-content"
-    : /header|top nav|navbar|top bar/.test(lower)
-      ? "topbar-content"
-      : "single-column";
-
-  const contentStyle = /dashboard|metric|analytics|kpi|chart|stat/.test(lower)
-    ? "dashboard"
-    : /form|input|field|signup|login|checkout/.test(lower)
-      ? "form"
-      : /catalog|grid|gallery|table|list|cards/.test(lower)
-        ? "catalog"
-        : /hero|landing|marketing|cta/.test(lower)
-          ? "marketing"
-          : "mixed";
-
-  const density = /dense|compact|tight|many/.test(lower)
-    ? "compact"
-    : "comfortable";
-
-  const emphasis = /button|cta|action|submit|buy|start/.test(lower)
-    ? "action"
-    : /metric|chart|stat|kpi|number/.test(lower)
-      ? "data"
-      : "narrative";
-
-  const sections = Array.from(
-    new Set(
-      [
-        /header|top|hero/.test(lower) ? "header" : null,
-        /sidebar|nav|menu/.test(lower) ? "sidebar" : null,
-        /metric|analytics|kpi|chart|stat/.test(lower) ? "metrics" : null,
-        /form|input|field|signup|login|checkout/.test(lower) ? "form" : null,
-        /table|list|grid|gallery|catalog|cards/.test(lower)
-          ? "content-grid"
-          : null,
-        /footer|legal|copyright/.test(lower) ? "footer" : null,
-      ].filter((v): v is string => Boolean(v)),
-    ),
-  );
-
-  return {
-    layout,
-    contentStyle,
-    density,
-    emphasis,
-    sections: sections.length > 0 ? sections : ["header", "content-grid"],
-  };
-}
-
-function composeVisionPromptWithTokens(rawPrompt: string): string {
-  const tokens = deriveVisionLayoutTokens(rawPrompt);
-
-  const tokenBlock = [
-    `[LAYOUT TOKENS]`,
-    `layout=${tokens.layout}`,
-    `contentStyle=${tokens.contentStyle}`,
-    `density=${tokens.density}`,
-    `emphasis=${tokens.emphasis}`,
-    `sections=${tokens.sections.join(",")}`,
-    "",
-    `[REFERENCE DESCRIPTION]`,
-    rawPrompt,
-  ].join("\n");
-
-  return tokenBlock;
 }
 
 function buildGeminiVisionPrompt(): string {
