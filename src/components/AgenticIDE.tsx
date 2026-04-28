@@ -168,7 +168,10 @@ export const AgenticIDE: React.FC = () => {
       return;
     }
 
-    if (swarmManager.connectionStatus === "ready") {
+    if (
+      swarmManager.connectionStatus === "ready" ||
+      swarmManager.connectionStatus === "standalone"
+    ) {
       setNetworkError(null);
     }
   }, [

@@ -5,6 +5,7 @@ const DEFAULT_PEER_SIGNAL_PORT = 9000;
 const DEFAULT_PEER_SIGNAL_PATH = "/peerjs";
 const PEER_INIT_TIMEOUT_MS = 30000;
 const PEER_INIT_MAX_RETRIES = 2;
+const LOCAL_PEER_FALLBACK_PREFIX = "local-peer";
 
 type LocalSignalingConfig = {
   host: string;
@@ -94,6 +95,12 @@ function describePeerError(error: unknown): string {
   }
 
   return "Unknown signaling error. Ensure npm run dev:swarm is running.";
+}
+
+function createLocalPeerId(): string {
+  const timePart = Date.now().toString(36);
+  const randomPart = Math.random().toString(36).slice(2, 8);
+  return `${LOCAL_PEER_FALLBACK_PREFIX}-${timePart}-${randomPart}`;
 }
 
 /**
@@ -348,11 +355,27 @@ export const useSwarm = () => {
             return;
           }
 
-          setIsInitialized(false);
-          setConnectionStatus("error");
-          setInitError(
-            `PeerJS initialization timed out after ${PEER_INIT_TIMEOUT_MS}ms. Ensure local signaling is running via "npm run dev:swarm" and reachable at ${signaling.host}:${signaling.port}${signaling.path}.`,
+          const fallbackPeerId = createLocalPeerId();
+          console.warn(
+            "[Swarm] Peer bootstrap timed out; using local demo peer ID",
+            {
+              fallbackPeerId,
+              signaling,
+            },
           );
+
+          setPeerId(fallbackPeerId);
+          setIsInitialized(true);
+          setConnectionStatus("standalone");
+          setInitError(
+            `PeerJS initialization timed out after ${PEER_INIT_TIMEOUT_MS}ms. Using local demo peer ID ${fallbackPeerId} so the UI can keep running on this device.`,
+          );
+
+          if (!peer.destroyed) {
+            peer.destroy();
+          }
+
+          peerRef.current = null;
         }, PEER_INIT_TIMEOUT_MS);
 
         // Handle disconnection
