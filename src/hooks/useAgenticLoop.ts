@@ -847,17 +847,7 @@ Rules:
                 "success",
               );
 
-              addLog(
-                "generation",
-                "Releasing 3B vision model before 7B coder handoff...",
-                "info",
-              );
-              await releaseEngineMemory(engineRef.current);
-              addLog(
-                "generation",
-                "3B vision model memory released. Loading 7B coder model...",
-                "info",
-              );
+              addLog("generation", "Loading 7B coder model...", "info");
 
               addLog("generation", "Generating React Architecture...", "info");
 

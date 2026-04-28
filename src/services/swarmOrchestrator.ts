@@ -89,23 +89,6 @@ async function createCompletionWithWorkerGuard<T>(
   }
 }
 
-async function releaseEngineMemory(engine: webllm.MLCEngine): Promise<void> {
-  const cleanupEngine = engine as webllm.MLCEngine & {
-    unload?: () => Promise<void> | void;
-    destroy?: () => Promise<void> | void;
-  };
-
-  if (typeof cleanupEngine.unload === "function") {
-    await cleanupEngine.unload();
-  } else if (typeof cleanupEngine.destroy === "function") {
-    await cleanupEngine.destroy();
-  }
-
-  await new Promise<void>((resolve) => {
-    window.setTimeout(() => resolve(), 1000);
-  });
-}
-
 function isAsyncIterable(value: unknown): value is AsyncIterable<string> {
   return (
     typeof value === "object" && value !== null && Symbol.asyncIterator in value
@@ -810,9 +793,7 @@ export async function executeWorkerTaskWithStreaming(
   const uiBlueprint = parsedBlueprint || "{}";
 
   emitLog("Vision blueprint extracted successfully.");
-  emitLog("Releasing 3B vision model before 7B coder handoff...");
-  await releaseEngineMemory(engine);
-  emitLog("3B vision model memory released. Loading 7B coder stage...");
+  emitLog("Loading 7B coder stage...");
 
   // Explicitly reload the 7B coder model after releasing 3B memory.
   emitLog("Generating React Architecture...");
