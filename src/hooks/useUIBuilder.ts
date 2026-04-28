@@ -114,6 +114,9 @@ export function useUIBuilder(
                 "react-dom": "^18.3.1",
               },
               devDependencies: {
+                tailwindcss: "^3.4.4",
+                postcss: "^8.4.38",
+                autoprefixer: "^10.4.19",
                 vite: "^5.3.1",
                 "@vitejs/plugin-react": "^4.3.1",
               },
@@ -129,13 +132,28 @@ export function useUIBuilder(
         );
 
         await webContainerService.writeFile(
+          "/tailwind.config.js",
+          `/** @type {import('tailwindcss').Config} */\nexport default {\n  content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],\n  theme: {\n    extend: {},\n  },\n  plugins: [],\n};\n`,
+        );
+
+        await webContainerService.writeFile(
+          "/postcss.config.js",
+          `export default {\n  plugins: {\n    tailwindcss: {},\n    autoprefixer: {},\n  },\n};\n`,
+        );
+
+        await webContainerService.writeFile(
+          "/src/styles.css",
+          `@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\nhtml, body, #root {\n  width: 100%;\n  height: 100%;\n  margin: 0;\n}\n\nbody {\n  font-family: Segoe UI, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;\n  background: #020617;\n}\n`,
+        );
+
+        await webContainerService.writeFile(
           "/index.html",
           `<!doctype html>\n<html lang="en">\n  <head>\n    <meta charset="UTF-8" />\n    <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n    <title>SouthStack Canvas Preview</title>\n  </head>\n  <body>\n    <div id="root"></div>\n    <script type="module" src="/src/main.jsx"></script>\n  </body>\n</html>\n`,
         );
 
         await webContainerService.writeFile(
           "/src/main.jsx",
-          `import React from "react";\nimport ReactDOM from "react-dom/client";\nimport App from "./index.js";\n\nReactDOM.createRoot(document.getElementById("root")).render(\n  <React.StrictMode>\n    <App />\n  </React.StrictMode>,\n);\n`,
+          `import React from "react";\nimport ReactDOM from "react-dom/client";\nimport App from "./index.js";\nimport "./styles.css";\n\nReactDOM.createRoot(document.getElementById("root")).render(\n  <React.StrictMode>\n    <App />\n  </React.StrictMode>,\n);\n`,
         );
 
         await webContainerService.writeFile(

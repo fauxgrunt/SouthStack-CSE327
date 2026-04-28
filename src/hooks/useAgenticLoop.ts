@@ -142,23 +142,6 @@ function isRecoverableEngineInstanceError(error: unknown): boolean {
   );
 }
 
-async function releaseEngineMemory(engine: webllm.MLCEngine): Promise<void> {
-  const cleanupEngine = engine as webllm.MLCEngine & {
-    unload?: () => Promise<void> | void;
-    destroy?: () => Promise<void> | void;
-  };
-
-  if (typeof cleanupEngine.unload === "function") {
-    await cleanupEngine.unload();
-  } else if (typeof cleanupEngine.destroy === "function") {
-    await cleanupEngine.destroy();
-  }
-
-  await new Promise<void>((resolve) => {
-    window.setTimeout(() => resolve(), 1000);
-  });
-}
-
 /**
  * useAgenticLoop - Core hook for autonomous AI coding with self-healing
  *
