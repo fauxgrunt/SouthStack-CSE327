@@ -18,6 +18,7 @@ interface CollaborativeCodeEditorProps {
   isAgentBusy: boolean;
   pauseAgentEdits: boolean;
   onPauseAgentEditsChange: (paused: boolean) => void;
+  focusRequest?: number;
 }
 
 const AGENT_STREAM_CHUNK_SIZE = 18;
@@ -31,6 +32,7 @@ export const CollaborativeCodeEditor: React.FC<
   isAgentBusy,
   pauseAgentEdits,
   onPauseAgentEditsChange,
+  focusRequest,
 }) => {
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<typeof Monaco | null>(null);
@@ -240,6 +242,23 @@ export const CollaborativeCodeEditor: React.FC<
     },
     [pauseAgentEdits, startAgentStream],
   );
+
+  useEffect(() => {
+    // If parent requested focus, move caret to document end and focus editor
+    if (typeof focusRequest === "number" && focusRequest) {
+      const editor = editorRef.current;
+      const monaco = monacoRef.current;
+      if (editor && monaco) {
+        const model = editor.getModel();
+        if (model) {
+          const endPos = model.getPositionAt(model.getValueLength());
+          editor.focus();
+          editor.setPosition(endPos);
+          editor.revealPositionInCenter(endPos);
+        }
+      }
+    }
+  }, [focusRequest]);
 
   useEffect(() => {
     if (!generatedCode) {

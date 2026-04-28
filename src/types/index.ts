@@ -466,32 +466,29 @@ export const SUPPORTED_LANGUAGES: FileLanguage[] = [
   "css",
 ];
 
-// MODEL_PRESETS - worker-focused quality tier with fallback
-export const MODEL_PRESETS: ModelConfig[] = [
-  {
-    id: "Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC",
-    name: "Qwen 2.5 Coder 1.5B",
-    size: "1.6GB",
-    vramRequired: 2,
-    contextWindow: 2048,
-    specialization: "code",
-  },
-  {
+// MODEL_PRESETS - strict staged pipeline presets
+export const STRICT_MODEL_REGISTRY = Object.freeze({
+  VISION_BLUEPRINT: Object.freeze({
     id: "Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC",
-    name: "Qwen 2.5 Coder 3B",
+    name: "Qwen 2.5 Coder 3B Vision Blueprint",
     size: "3.2GB",
     vramRequired: 4,
     contextWindow: 3072,
     specialization: "code",
-  },
-  {
-    id: "Qwen2.5-Coder-0.5B-Instruct-q4f16_1-MLC",
-    name: "Qwen 2.5 Coder 0.5B",
-    size: "500MB",
-    vramRequired: 1,
-    contextWindow: 2048,
+  }),
+  REACT_CODER: Object.freeze({
+    id: "Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC",
+    name: "Qwen 2.5 Coder 7B React Architect",
+    size: "7.0GB",
+    vramRequired: 8,
+    contextWindow: 4096,
     specialization: "code",
-  },
+  }),
+});
+
+export const MODEL_PRESETS: ModelConfig[] = [
+  STRICT_MODEL_REGISTRY.VISION_BLUEPRINT,
+  STRICT_MODEL_REGISTRY.REACT_CODER,
 ];
 
 export const DEFAULT_INFERENCE_OPTIONS: InferenceOptions = {

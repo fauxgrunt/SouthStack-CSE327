@@ -1,6 +1,100 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import Peer, { DataConnection } from "peerjs";
 
+const DEFAULT_PEER_SIGNAL_PORT = 9000;
+const DEFAULT_PEER_SIGNAL_PATH = "/peerjs";
+const PEER_INIT_TIMEOUT_MS = 12000;
+
+type LocalSignalingConfig = {
+  host: string;
+  port: number;
+  path: string;
+  secure: boolean;
+};
+
+function normalizeSignalingHost(
+  candidateHost: string | undefined,
+  fallbackHost: string,
+): string {
+  const trimmed = candidateHost?.trim() ?? "";
+  if (!trimmed) {
+    return fallbackHost;
+  }
+
+  const lowered = trimmed.toLowerCase();
+  if (lowered === "0.0.0.0" || lowered === "::") {
+    return fallbackHost;
+  }
+
+  return trimmed;
+}
+
+function normalizeSignalingPath(candidatePath: string | undefined): string {
+  const trimmed = candidatePath?.trim() ?? "";
+  if (!trimmed) {
+    return DEFAULT_PEER_SIGNAL_PATH;
+  }
+
+  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+}
+
+function resolveLocalSignalingConfig(): LocalSignalingConfig {
+  const env = import.meta.env as {
+    VITE_PEER_SIGNAL_HOST?: string;
+    VITE_PEER_SIGNAL_PORT?: string;
+    VITE_PEER_SIGNAL_PATH?: string;
+    VITE_PEER_SIGNAL_SECURE?: string;
+  };
+
+  const fallbackHost = window.location.hostname?.trim() || "localhost";
+  const host = normalizeSignalingHost(env.VITE_PEER_SIGNAL_HOST, fallbackHost);
+  const port = Number(env.VITE_PEER_SIGNAL_PORT || DEFAULT_PEER_SIGNAL_PORT);
+  const path = normalizeSignalingPath(env.VITE_PEER_SIGNAL_PATH);
+  const secure = env.VITE_PEER_SIGNAL_SECURE === "true";
+
+  if (!host) {
+    throw new Error("Missing local signaling host for PeerJS.");
+  }
+
+  if (!Number.isFinite(port) || port <= 0) {
+    throw new Error("Invalid local signaling port for PeerJS.");
+  }
+
+  return { host, port, path, secure };
+}
+
+function describePeerError(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message.trim();
+  }
+
+  if (typeof error === "string" && error.trim()) {
+    return error.trim();
+  }
+
+  if (typeof error === "object" && error !== null) {
+    const typed = error as {
+      type?: unknown;
+      message?: unknown;
+      data?: unknown;
+    };
+
+    if (typeof typed.message === "string" && typed.message.trim()) {
+      return typed.message.trim();
+    }
+
+    if (typeof typed.type === "string" && typed.type.trim()) {
+      return typed.type.trim();
+    }
+
+    if (typeof typed.data === "string" && typed.data.trim()) {
+      return typed.data.trim();
+    }
+  }
+
+  return "Unknown signaling error. Ensure npm run dev:swarm is running.";
+}
+
 /**
  * Swarm Task Payload Interface
  */
@@ -12,6 +106,7 @@ export interface SwarmTaskPayload {
     | "TASK_ASSIGN"
     | "TASK_COMPLETE"
     | "STATUS_UPDATE"
+    | "WORKER_STATUS"
     | "DEBUG_ANALYSIS"
     | "DEBUG_REQUEST_NEXT"
     | "DEBUG_ANALYSIS_RESULT";
@@ -30,6 +125,7 @@ type SwarmMessageEnvelope = {
     | "STATE"
     | "PING"
     | "PONG"
+    | "WORKER_STATUS"
     | "DEBUG_ANALYSIS"
     | "DEBUG_REQUEST_NEXT"
     | "DEBUG_ANALYSIS_RESULT"
@@ -66,6 +162,7 @@ export const useSwarm = () => {
   const [isInitialized, setIsInitialized] = useState<boolean>(false);
   const [connectionStatus, setConnectionStatus] =
     useState<string>("disconnected");
+  const [initError, setInitError] = useState<string | null>(null);
   const [isMasterHeartbeatHealthy, setIsMasterHeartbeatHealthy] =
     useState<boolean>(true);
 
@@ -83,8 +180,39 @@ export const useSwarm = () => {
     isMasterRef.current = isMaster;
   }, [isMaster]);
 
+  const setArrayBufferBinaryMode = useCallback((conn: DataConnection) => {
+    const dataChannel = (conn as unknown as { dataChannel?: RTCDataChannel })
+      .dataChannel;
+
+    if (!dataChannel) {
+      return;
+    }
+
+    if (dataChannel.binaryType !== "arraybuffer") {
+      dataChannel.binaryType = "arraybuffer";
+    }
+  }, []);
+
   const normalizeIncomingData = useCallback((rawData: unknown) => {
+    if (
+      typeof rawData === "string" &&
+      (rawData.includes('"type":"PING"') || rawData.includes('"type":"PONG"'))
+    ) {
+      return JSON.parse(rawData) as {
+        type: "PING" | "PONG";
+        timestamp?: number;
+      };
+    }
+
     console.log("[WEBRTC WORKER] Received data:", rawData);
+
+    if (rawData instanceof ArrayBuffer) {
+      return {
+        type: "BINARY_BUFFER",
+        payload: rawData,
+        byteLength: rawData.byteLength,
+      };
+    }
 
     if (typeof rawData === "string") {
       try {
@@ -124,23 +252,37 @@ export const useSwarm = () => {
    * Initialize Peer instance
    */
   useEffect(() => {
+    let initTimeoutId: number | null = null;
+
     if (!peerRef.current) {
       try {
-        // Initialize PeerJS with configuration
+        const signaling = resolveLocalSignalingConfig();
+        setConnectionStatus("initializing");
+        setIsInitialized(false);
+        setInitError(null);
+
+        // Initialize PeerJS against local signaling infrastructure only.
         const peer = new Peer({
+          host: signaling.host,
+          port: signaling.port,
+          path: signaling.path,
+          secure: signaling.secure,
           config: {
-            iceServers: [
-              { urls: "stun:stun.l.google.com:19302" },
-              { urls: "stun:global.stun.twilio.com:3478" },
-            ],
+            iceServers: [],
           },
         });
 
         // Handle successful peer connection
         peer.on("open", (id) => {
+          if (initTimeoutId !== null) {
+            window.clearTimeout(initTimeoutId);
+            initTimeoutId = null;
+          }
+
           console.log("[Swarm] Peer initialized with ID:", id);
           setPeerId(id);
           setIsInitialized(true);
+          setInitError(null);
           setConnectionStatus("ready");
         });
 
@@ -162,13 +304,36 @@ export const useSwarm = () => {
 
         // Handle errors
         peer.on("error", (error) => {
+          if (initTimeoutId !== null) {
+            window.clearTimeout(initTimeoutId);
+            initTimeoutId = null;
+          }
+
           console.error("[Swarm] Peer error:", error);
+          const message = describePeerError(error);
+          setIsInitialized(false);
+          setInitError(
+            `PeerJS signaling failed (${signaling.host}:${signaling.port}${signaling.path}): ${message}`,
+          );
           setConnectionStatus("error");
         });
+
+        initTimeoutId = window.setTimeout(() => {
+          if (peer.destroyed || peer.id) {
+            return;
+          }
+
+          setIsInitialized(false);
+          setConnectionStatus("error");
+          setInitError(
+            `PeerJS initialization timed out after ${PEER_INIT_TIMEOUT_MS}ms. Ensure local signaling is running via "npm run dev:swarm" and reachable at ${signaling.host}:${signaling.port}${signaling.path}.`,
+          );
+        }, PEER_INIT_TIMEOUT_MS);
 
         // Handle disconnection
         peer.on("disconnected", () => {
           console.log("[Swarm] Peer disconnected");
+          setIsInitialized(false);
           setConnectionStatus("disconnected");
           // Attempt to reconnect
           if (!peer.destroyed) {
@@ -179,12 +344,19 @@ export const useSwarm = () => {
         peerRef.current = peer;
       } catch (error) {
         console.error("[Swarm] Failed to initialize peer:", error);
+        const message = error instanceof Error ? error.message : String(error);
+        setIsInitialized(false);
+        setInitError(message);
         setConnectionStatus("error");
       }
     }
 
     // Cleanup on unmount
     return () => {
+      if (initTimeoutId !== null) {
+        window.clearTimeout(initTimeoutId);
+      }
+
       if (peerRef.current) {
         peerRef.current.destroy();
         peerRef.current = null;
@@ -203,8 +375,10 @@ export const useSwarm = () => {
       }
 
       registeredConnectionHandlersRef.current.add(conn);
+      setArrayBufferBinaryMode(conn);
 
       conn.on("open", () => {
+        setArrayBufferBinaryMode(conn);
         console.log("[WEBRTC MASTER] Channel Open", { peer: conn.peer });
         setConnectionStatus("connected");
 
@@ -217,7 +391,6 @@ export const useSwarm = () => {
       });
 
       conn.on("data", (rawData) => {
-        console.log("[WEBRTC WORKER] Received data:", rawData);
         const data = normalizeIncomingData(rawData);
 
         if (typeof data === "object" && data !== null && "type" in data) {
@@ -247,9 +420,24 @@ export const useSwarm = () => {
 
         console.log("[Swarm] Data received from", conn.peer, ":", data);
 
-        // Call custom data handler if registered
+        // Call custom data handler if registered, but never block delivery.
         if (dataHandlerRef.current) {
-          dataHandlerRef.current(data, conn);
+          try {
+            dataHandlerRef.current(data, conn);
+          } catch (error) {
+            console.warn(
+              "[Swarm] Data handler failed; keeping raw payload available.",
+              { peer: conn.peer, error, data },
+            );
+          }
+        } else {
+          console.warn(
+            "[Swarm] No data handler registered; raw payload kept.",
+            {
+              peer: conn.peer,
+              data,
+            },
+          );
         }
       });
 
@@ -262,7 +450,7 @@ export const useSwarm = () => {
         console.error("[Swarm] Connection error with", conn.peer, ":", error);
       });
     },
-    [normalizeIncomingData],
+    [normalizeIncomingData, setArrayBufferBinaryMode],
   );
 
   useEffect(() => {
@@ -576,6 +764,7 @@ export const useSwarm = () => {
     isMaster,
     isInitialized,
     connectionStatus,
+    initError,
     isMasterHeartbeatHealthy,
     activeConnectionCount: connections.filter((c) => c.open).length,
 

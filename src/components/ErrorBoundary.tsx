@@ -4,6 +4,7 @@ import { logger } from "../utils/logger";
 interface Props {
   children: ReactNode;
   fallback?: ReactNode;
+  onError?: (error: Error) => void;
 }
 
 interface State {
@@ -30,6 +31,13 @@ export class ErrorBoundary extends Component<Props, State> {
       component: "ErrorBoundary",
       data: errorInfo,
     });
+    if (typeof this.props.onError === "function") {
+      try {
+        this.props.onError(error);
+      } catch (e) {
+        // swallow errors from onError handler
+      }
+    }
   }
 
   private handleReset = () => {

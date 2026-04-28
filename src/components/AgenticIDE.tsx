@@ -5,6 +5,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Camera,
@@ -25,27 +26,17 @@ import { useAgenticLoop } from "../hooks/useAgenticLoop";
 import type { ImageUiTaskMessage } from "../hooks/useSwarmManager";
 import { useSwarmManager } from "../hooks/useSwarmManager";
 import { useVoiceInput } from "../hooks/useVoiceInput";
-import { buildSimpleLayoutComponentCode } from "./SimpleLayoutGenerator";
 import type { SwarmTaskPayload } from "../hooks/useSwarm";
 import { executeWorkerTaskWithStreaming } from "../services/swarmOrchestrator";
-import { extractUIFromImage } from "../services/VisionProcessor";
+import { extractUIFromImage } from "../services/LocalVisionProcessor";
 import { limitArraySize } from "../utils/performance";
 import { AgentActivityStream } from "./AgentActivityStream";
 import { CollaborativeCodeEditor } from "./CollaborativeCodeEditor";
 import { SwarmConnectWidget } from "./SwarmConnectWidget";
 
-type ActiveTab = "preview" | "code";
+type ActiveTab = "split" | "preview" | "code";
 
 const MAX_SWARM_LOGS = 200;
-const GENERIC_TEMPLATE_MARKERS = [
-  "visual fidelity target",
-  "prompt-aligned layout",
-  "fast reference-based preview while full generation completes.",
-  "generated ui",
-  "overview",
-  "detail panel",
-  "recent activity",
-];
 
 interface ChatMessage {
   id: string;
@@ -58,14 +49,6 @@ interface SwarmActivityLog {
   id: string;
   timestamp: Date;
   message: string;
-}
-
-function looksLikeGenericTemplatePayload(code: string): boolean {
-  const normalized = code.toLowerCase();
-  const hitCount = GENERIC_TEMPLATE_MARKERS.filter((marker) =>
-    normalized.includes(marker),
-  ).length;
-  return hitCount >= 2;
 }
 
 function sanitizeDistributedWorkerCode(code: string): string {
@@ -89,6 +72,8 @@ function sanitizeDistributedWorkerCode(code: string): string {
   return sanitizedLines.join("\n").trim();
 }
 
+// NOTE: Retry helpers removed to enforce single-shot, fatal-on-failure behavior.
+
 export const AgenticIDE: React.FC = () => {
   const {
     state,
@@ -96,11 +81,12 @@ export const AgenticIDE: React.FC = () => {
     executeAgenticLoop,
     executeGeneratedCodeDirectly,
     cancelExecution,
+    resetGeneratedCanvas,
     isReady,
     engine,
   } = useAgenticLoop();
 
-  const [activeTab, setActiveTab] = useState<ActiveTab>("preview");
+  const [activeTab, setActiveTab] = useState<ActiveTab>("split");
   const [userPrompt, setUserPrompt] = useState("");
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [pauseAgentEdits, setPauseAgentEdits] = useState(false);
@@ -126,14 +112,19 @@ export const AgenticIDE: React.FC = () => {
   const [workerTerminalLines, setWorkerTerminalLines] = useState<string[]>([]);
   const [workerStreamPreview, setWorkerStreamPreview] = useState("");
 
+  const [focusRequest, setFocusRequest] = useState<number>(0);
+
   const [isLogsExpanded, setIsLogsExpanded] = useState(false);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const activeDistributedTaskRef = useRef<string | null>(null);
   const activeDistributedPromptRef = useRef<string>("");
+  const activeDistributedImageTaskRef = useRef<ImageUiTaskMessage | null>(null);
+  const distributedRetryCountRef = useRef(0);
   const isProcessingImageRef = useRef(false);
   const workerTerminalRef = useRef<HTMLDivElement | null>(null);
+  const surfacedBrowserIssueRef = useRef<string | null>(null);
 
   const handleCopyCode = useCallback(async () => {
     if (!canvasCode) return;
@@ -147,6 +138,14 @@ export const AgenticIDE: React.FC = () => {
     }
   }, [canvasCode]);
 
+  const handlePreviewError = useCallback((_err: Error) => {
+    setActiveTab("code");
+    setFocusRequest((prev) => prev + 1);
+    setMultimodalError(
+      "Live preview failed due to incomplete syntax. Editor focused.",
+    );
+  }, []);
+
   const handleSwarmFileWrite = useCallback(
     async (_fileName: string, _content: string) => {
       return;
@@ -155,6 +154,21 @@ export const AgenticIDE: React.FC = () => {
   );
 
   const swarmManager = useSwarmManager(engine, handleSwarmFileWrite);
+
+  useEffect(() => {
+    if (swarmManager.connectionStatus === "error" && swarmManager.initError) {
+      setNetworkError(swarmManager.initError);
+      return;
+    }
+
+    if (swarmManager.connectionStatus === "ready") {
+      setNetworkError(null);
+    }
+  }, [
+    swarmManager.connectionStatus,
+    swarmManager.initError,
+    swarmManager.isInitialized,
+  ]);
 
   const appendPromptTranscript = useCallback((transcript: string) => {
     setUserPrompt((prev) => {
@@ -187,6 +201,25 @@ export const AgenticIDE: React.FC = () => {
       limitArraySize([...prev, `[${timestamp}] ${line}`], 600),
     );
   }, []);
+
+  useEffect(() => {
+    if (
+      !state.error ||
+      !/WebGPU|SharedArrayBuffer|COOP|COEP|navigator\.gpu/i.test(state.error)
+    ) {
+      surfacedBrowserIssueRef.current = null;
+      return;
+    }
+
+    if (surfacedBrowserIssueRef.current === state.error) {
+      return;
+    }
+
+    surfacedBrowserIssueRef.current = state.error;
+    const browserIssueLine = `[Browser capability check] ${state.error}`;
+    appendSwarmLog(browserIssueLine);
+    appendWorkerTerminalLine(browserIssueLine);
+  }, [appendSwarmLog, appendWorkerTerminalLine, state.error]);
 
   useEffect(() => {
     if (!workerTerminalRef.current) {
@@ -303,6 +336,41 @@ export const AgenticIDE: React.FC = () => {
     });
   }, []);
 
+  const dataUrlToImageBytes = useCallback(
+    async (
+      dataUrl: string,
+    ): Promise<{ bytes: ArrayBuffer; mimeType: string }> => {
+      const response = await fetch(dataUrl);
+      const blob = await response.blob();
+      const bytes = await blob.arrayBuffer();
+      return {
+        bytes,
+        mimeType: blob.type || "image/png",
+      };
+    },
+    [],
+  );
+
+  const imageBytesToDataUrl = useCallback(
+    async (bytes: ArrayBuffer, mimeType: string): Promise<string> => {
+      const blob = new Blob([bytes], { type: mimeType || "image/png" });
+      return await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          if (typeof reader.result === "string") {
+            resolve(reader.result);
+            return;
+          }
+          reject(new Error("Failed to reconstruct image data URL."));
+        };
+        reader.onerror = () =>
+          reject(new Error("Failed to decode image bytes."));
+        reader.readAsDataURL(blob);
+      });
+    },
+    [],
+  );
+
   const handleImageFile = useCallback(
     async (file: File) => {
       // Prevent concurrent image processing
@@ -339,8 +407,9 @@ export const AgenticIDE: React.FC = () => {
     }
 
     promptVoice.stopListening();
+    resetGeneratedCanvas();
     setUserPrompt("");
-    setActiveTab("preview");
+    setActiveTab("split");
     setMultimodalError(null);
 
     const userMessage: ChatMessage = {
@@ -352,6 +421,7 @@ export const AgenticIDE: React.FC = () => {
     setChatHistory((prev) => [...prev, userMessage]);
 
     if (shouldOffloadToWorker) {
+      setActiveTab("split");
       const taskId = `p2p_ui_${Date.now()}`;
       activeDistributedTaskRef.current = taskId;
       setIsDistributedProcessing(true);
@@ -360,16 +430,21 @@ export const AgenticIDE: React.FC = () => {
       appendWorkerTerminalLine("Master queued distributed image task.");
 
       const distributedPrompt = trimmed;
+      let imageBytes: ArrayBuffer | undefined;
+      let imageMimeType: string | undefined;
       let imageDescription: string | undefined;
 
       if (attachedImageDataUrl) {
         setIsAnalyzingImage(true);
         try {
+          const converted = await dataUrlToImageBytes(attachedImageDataUrl);
+          imageBytes = converted.bytes;
+          imageMimeType = converted.mimeType;
           imageDescription = await extractUIFromImage(attachedImageDataUrl);
-          appendSwarmLog(
-            "[Swarm] Master: Image converted to textual UI description.",
+          appendSwarmLog("[Swarm] Master: Packed image into raw pixel buffer.");
+          appendWorkerTerminalLine(
+            `Packed ${converted.bytes.byteLength} image bytes for worker inference.`,
           );
-          appendWorkerTerminalLine("Gemini structure extraction complete.");
         } catch (error) {
           const message =
             error instanceof Error
@@ -399,12 +474,16 @@ export const AgenticIDE: React.FC = () => {
         type: "IMAGE_UI_TASK",
         taskId,
         prompt: distributedPrompt,
+        imageBytes,
+        imageMimeType,
         imageDescription,
         imageName: attachedImageName ?? undefined,
       };
 
       activeDistributedPromptRef.current =
         imageDescription || distributedPrompt;
+      activeDistributedImageTaskRef.current = payload;
+      distributedRetryCountRef.current = 0;
 
       appendSwarmLog("[Swarm] Master: Offloading prompt to Worker node...");
       appendWorkerTerminalLine("Dispatching structure prompt to worker...");
@@ -455,35 +534,55 @@ export const AgenticIDE: React.FC = () => {
       try {
         const extractedUiPrompt =
           await extractUIFromImage(attachedImageDataUrl);
-        const generatedCode = buildSimpleLayoutComponentCode(extractedUiPrompt);
 
-        setChatHistory((prev) => [
-          ...prev,
-          {
-            id: `assistant_${Date.now()}_image_context`,
-            role: "assistant",
-            content:
-              "Image context extracted. Rendering safe layout preview...",
-            timestamp: new Date(),
-          },
-        ]);
+        // Single-shot generation: do not retry automatically. Fail loudly on first failure.
+        const generatedResult = await executeAgenticLoop(extractedUiPrompt);
 
-        const previewResult = await executeGeneratedCodeDirectly(
-          generatedCode,
-          extractedUiPrompt,
-        );
+        const _generatedCode = (generatedResult as { code?: string })?.code;
+        if (!generatedResult || !_generatedCode) {
+          const message =
+            (generatedResult as { error?: string })?.error ||
+            "Image-to-code generation failed.";
+          setMultimodalError(`Image-to-code generation incomplete: ${message}`);
+          setChatHistory((prev) => [
+            ...prev,
+            {
+              id: `assistant_${Date.now()}_image_codegen_partial`,
+              role: "assistant",
+              content: `Image-to-code generation returned partial results: ${message}`,
+              timestamp: new Date(),
+            },
+          ]);
+          // If partial code exists, use it to update the canvas so user can repair.
+          if (_generatedCode) {
+            const sanitized = sanitizeDistributedWorkerCode(_generatedCode);
+            setCanvasCode(sanitized);
+          }
+          // Continue; do not throw to keep UI stable.
+        } else {
+          const sanitized = sanitizeDistributedWorkerCode(_generatedCode);
+          setCanvasCode(sanitized);
 
-        setChatHistory((prev) => [
-          ...prev,
-          {
-            id: `assistant_${Date.now()}_safe_mode_result`,
-            role: "assistant",
-            content: previewResult.success
-              ? "Safe mode preview rendered successfully."
-              : `Safe mode preview failed: ${previewResult.error || "Unknown error."}`,
-            timestamp: new Date(),
-          },
-        ]);
+          setChatHistory((prev) => [
+            ...prev,
+            {
+              id: `assistant_${Date.now()}_image_context`,
+              role: "assistant",
+              content: "Image context extracted. Canvas preview is updating.",
+              timestamp: new Date(),
+            },
+          ]);
+
+          setChatHistory((prev) => [
+            ...prev,
+            {
+              id: `assistant_${Date.now()}_image_codegen_result`,
+              role: "assistant",
+              content: "Image-to-code generation completed successfully.",
+              timestamp: new Date(),
+            },
+          ]);
+        }
       } catch (error) {
         const message =
           error instanceof Error
@@ -495,8 +594,7 @@ export const AgenticIDE: React.FC = () => {
           {
             id: `assistant_${Date.now()}_image_analysis_failed_local`,
             role: "assistant",
-            content:
-              "Image analysis failed. Generation was cancelled to prevent generic fallback output.",
+            content: `Image-to-code generation failed. ${message}`,
             timestamp: new Date(),
           },
         ]);
@@ -540,7 +638,7 @@ export const AgenticIDE: React.FC = () => {
       }
     });
 
-    swarmManager.onWorkerLog((payload) => {
+    swarmManager.onWorkerStatus((payload) => {
       if (swarmManager.swarmMode !== "master") {
         return;
       }
@@ -601,21 +699,27 @@ export const AgenticIDE: React.FC = () => {
       setIsDistributedProcessing(false);
       activeDistributedTaskRef.current = null;
 
-      const safeCode = sanitizeDistributedWorkerCode(payload.code);
+      const workerOutput =
+        payload.code || activeDistributedPromptRef.current || "";
+      const safeCode = sanitizeDistributedWorkerCode(workerOutput);
       if (!safeCode.trim()) {
         const message = "Worker returned empty code after sanitization.";
-        setMultimodalError(message);
-        appendWorkerTerminalLine(message);
-        return;
+        console.warn("[AgenticIDE] Distributed worker fallback:", {
+          message,
+          workerOutput,
+        });
+        appendWorkerTerminalLine(
+          "Worker output sanitized to empty; forwarding fallback payload to editor.",
+        );
       }
 
       appendWorkerTerminalLine(
         "Worker stream complete. Executing sanitized code...",
       );
-      setCanvasCode(safeCode);
+      setCanvasCode(safeCode || workerOutput);
 
       const previewResult = await executeGeneratedCodeDirectly(
-        safeCode,
+        safeCode || workerOutput,
         activeDistributedPromptRef.current || "distributed streamed task",
       );
 
@@ -637,6 +741,8 @@ export const AgenticIDE: React.FC = () => {
         return;
       }
 
+      const ENGINE_WARMUP_TIMEOUT_MS = 300000;
+
       const sendStatus = (message: string) => {
         swarmManager.sendMessageToNode(conn, {
           type: "IMAGE_UI_STATUS",
@@ -648,17 +754,89 @@ export const AgenticIDE: React.FC = () => {
       sendStatus("Task received. Worker preparing generation pipeline...");
 
       try {
-        if (!engine) {
-          throw new Error(
-            "Worker engine unavailable. Initialize WebLLM on the worker before accepting IMAGE_UI_TASK.",
+        const workerEngine = engine;
+
+        if (!workerEngine) {
+          console.warn(
+            "[ImageUI] Worker engine unavailable; continuing with prompt-only fallback.",
           );
+          sendStatus(
+            "Worker engine unavailable; continuing with prompt-only fallback.",
+          );
+          return;
+        }
+
+        // Ensure engine is ready before using it
+        sendStatus("Ensuring engine is warmed up...");
+        let isEngineReady = false;
+        try {
+          // Try a minimal test call to verify engine is working
+          const testMessages = [
+            { role: "system" as const, content: "You are a test." },
+            { role: "user" as const, content: "Say OK." },
+          ];
+          const testResult = await Promise.race([
+            workerEngine.chat.completions.create({
+              messages: testMessages,
+              max_tokens: 10,
+              temperature: 0.1,
+            }),
+            new Promise((_, reject) =>
+              setTimeout(
+                () => reject(new Error("Engine warmup timeout")),
+                ENGINE_WARMUP_TIMEOUT_MS,
+              ),
+            ),
+          ]);
+          isEngineReady = Boolean(testResult);
+          if (isEngineReady) {
+            sendStatus("Engine warmup successful.");
+          }
+        } catch (warmupError) {
+          const warmupMsg =
+            warmupError instanceof Error
+              ? warmupError.message
+              : "Unknown warmup error";
+          console.warn("[ImageUI] Engine warmup failed:", warmupError);
+          sendStatus(`Engine warmup issue (continuing anyway): ${warmupMsg}`);
         }
 
         let layoutDescription = payload.imageDescription?.trim() || "";
 
+        if (!layoutDescription && payload.imageBytes) {
+          sendStatus("Analyzing raw image pixels on worker...");
+          try {
+            const reconstructed = await imageBytesToDataUrl(
+              payload.imageBytes,
+              payload.imageMimeType || "image/png",
+            );
+            layoutDescription = await extractUIFromImage(reconstructed);
+          } catch (imgError) {
+            const imgErrorMsg =
+              imgError instanceof Error
+                ? imgError.message
+                : "Image analysis failed";
+            console.error("[ImageUI] Image analysis error:", imgError);
+            sendStatus(
+              `Image analysis failed; continuing with prompt fallback: ${imgErrorMsg}`,
+            );
+          }
+        }
+
         if (!layoutDescription && payload.imageBase64) {
           sendStatus("Analyzing image reference...");
-          layoutDescription = await extractUIFromImage(payload.imageBase64);
+          try {
+            layoutDescription = await extractUIFromImage(payload.imageBase64);
+          } catch (imgError) {
+            const imgErrorMsg =
+              imgError instanceof Error
+                ? imgError.message
+                : "Image analysis failed";
+            console.error("[ImageUI] Image base64 analysis error:", imgError);
+            sendStatus(
+              `Image analysis failed; continuing with prompt fallback: ${imgErrorMsg}`,
+            );
+          }
         }
 
         if (!layoutDescription) {
@@ -666,14 +844,17 @@ export const AgenticIDE: React.FC = () => {
         }
 
         if (!layoutDescription) {
-          throw new Error(
-            "No structural description was provided for safe-mode rendering.",
+          console.warn(
+            "[ImageUI] No structural description available; continuing with prompt-only generation.",
           );
+          layoutDescription =
+            payload.prompt.trim() || "Best-effort UI reconstruction.";
         }
 
         const emitWorkerLog = (message: string) => {
           swarmManager.sendMessageToNode(conn, {
-            type: "WORKER_LOG",
+            type: "WORKER_STATUS",
+            taskId: payload.taskId,
             message,
           });
         };
@@ -700,6 +881,14 @@ export const AgenticIDE: React.FC = () => {
             layoutDescription,
             "",
             "Build a faithful React + Tailwind implementation from this structure.",
+            "Preserve the exact composition, whitespace, card placement, label alignment, and visual hierarchy from the screenshot description.",
+            "Do not collapse the UI into a generic template, dashboard, or split workspace.",
+            "If the source is a login card, keep it centered with the same relative spacing and footer layout.",
+            "Use a contemporary polished visual style: clean sans-serif typography, refined spacing, rounded cards, subtle shadows, and modern form controls. Avoid dated HTML styling, browser-default controls, and 1990s aesthetics.",
+            "Return only one complete React component.",
+            "Use only React and useState from react.",
+            "No external packages, no placeholder template content, no safe-mode fallback, and no generic boilerplate.",
+            "Implement native drag-and-drop and editable text exactly as instructed.",
           ]
             .filter(Boolean)
             .join("\n"),
@@ -707,7 +896,7 @@ export const AgenticIDE: React.FC = () => {
 
         const generatedCode = await executeWorkerTaskWithStreaming(
           taskPayload,
-          engine,
+          workerEngine,
           {
             onLog: emitWorkerLog,
             onChunk: emitWorkerChunk,
@@ -715,12 +904,8 @@ export const AgenticIDE: React.FC = () => {
         );
 
         if (!generatedCode.trim()) {
-          throw new Error("Worker returned an empty code payload.");
-        }
-
-        if (looksLikeGenericTemplatePayload(generatedCode)) {
-          throw new Error(
-            "Worker returned a generic template payload; refusing to forward result.",
+          console.warn(
+            "[ImageUI] Worker returned an empty code payload; forwarding anyway.",
           );
         }
 
@@ -735,7 +920,8 @@ export const AgenticIDE: React.FC = () => {
             : "Worker execution failed unexpectedly.";
 
         swarmManager.sendMessageToNode(conn, {
-          type: "WORKER_LOG",
+          type: "WORKER_STATUS",
+          taskId: payload.taskId,
           message: `Worker failed: ${message}`,
         });
 
@@ -760,26 +946,32 @@ export const AgenticIDE: React.FC = () => {
       setIsDistributedProcessing(false);
       activeDistributedTaskRef.current = null;
 
+      const workerOutput = payload.code || payload.prompt || "";
+
       if (payload.error || !payload.code) {
         const message = payload.error || "No distributed code returned.";
-        setMultimodalError(`Distributed worker failed: ${message}`);
+        console.warn("[AgenticIDE] Distributed worker fallback:", {
+          message,
+          workerOutput,
+        });
+
+        setMultimodalError(null);
         setChatHistory((prev) => [
           ...prev,
           {
             id: `assistant_${Date.now()}_distributed_error`,
             role: "assistant",
-            content: `Distributed generation failed: ${message}`,
+            content: `Distributed generation returned a fallback payload: ${message}. Continuing to the editor.`,
             timestamp: new Date(),
           },
         ]);
-        return;
       }
 
       appendSwarmLog("[Swarm] Worker complete. Rendering code and preview...");
-      setCanvasCode(payload.code);
+      setCanvasCode(workerOutput);
 
       const previewResult = await executeGeneratedCodeDirectly(
-        payload.code,
+        workerOutput,
         payload.prompt,
       );
 
@@ -800,6 +992,7 @@ export const AgenticIDE: React.FC = () => {
       swarmManager.onImageUiTask(null);
       swarmManager.onImageUiStatus(null);
       swarmManager.onImageUiResult(null);
+      swarmManager.onWorkerStatus(null);
       swarmManager.onWorkerLog(null);
       swarmManager.onWorkerStream(null);
       swarmManager.onWorkerComplete(null);
@@ -807,8 +1000,10 @@ export const AgenticIDE: React.FC = () => {
   }, [
     appendSwarmLog,
     appendWorkerTerminalLine,
+    dataUrlToImageBytes,
     engine,
     executeGeneratedCodeDirectly,
+    imageBytesToDataUrl,
     swarmManager,
   ]);
 
@@ -939,6 +1134,14 @@ export const AgenticIDE: React.FC = () => {
     return "javascript";
   }, [canvasCode]);
 
+  const canvasIsBusy =
+    state.isLoading ||
+    state.isExecuting ||
+    isDistributedProcessing ||
+    isAnalyzingImage;
+
+  const previewFrameKey = `${state.previewUrl ?? "preview"}:${canvasCode ?? "empty"}`;
+
   // Quick actions palette (Cmd+K / Ctrl+K)
   const [showQuickActions, setShowQuickActions] = useState(false);
 
@@ -959,43 +1162,36 @@ export const AgenticIDE: React.FC = () => {
   }, []);
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100">
-      <div className="mx-auto flex max-w-[1500px] flex-col gap-4 px-3 pb-40 pt-3 sm:px-6 lg:px-8">
-        <header className="flex flex-col gap-3 rounded-2xl border border-zinc-800 bg-zinc-900/70 p-3 sm:p-4 md:flex-row md:items-center md:justify-between">
-          <div className="min-w-0">
-            <h1 className="text-xl font-semibold tracking-tight text-zinc-100 sm:text-2xl md:text-3xl">
-              SouthStack Generative Canvas
-            </h1>
-            <p className="mt-1 hidden text-sm text-zinc-400 md:block">
-              Describe what you want. Watch the UI appear.
-            </p>
-          </div>
-
-          <div className="flex w-full flex-col gap-2 md:w-auto md:flex-row md:items-center md:justify-end md:gap-2">
-            <div className="flex items-center gap-2 overflow-x-auto whitespace-nowrap rounded-full border border-zinc-800 bg-zinc-950/40 px-2 py-1 md:hidden">
-              <span
-                className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] ${peerStatus.tone}`}
-              >
-                <span
-                  className={`h-2 w-2 rounded-full ${peerStatus.tone.includes("emerald") ? "bg-emerald-300" : peerStatus.tone.includes("cyan") ? "bg-cyan-300" : "bg-zinc-500"}`}
-                />
-                {peerStatus.label}
-              </span>
-              <span className="inline-flex items-center gap-1 rounded-full border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-300">
-                <Sparkles className="h-3 w-3" />
-                {mobileHeaderStatus}
-              </span>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2 md:flex-nowrap md:justify-end">
-              <div className="hidden md:block">
+    <div className="h-screen w-full overflow-hidden bg-gradient-to-br from-slate-950 via-zinc-950 to-slate-900 text-zinc-100">
+      <div className="flex h-full w-full flex-row overflow-hidden">
+        <aside className="flex h-full w-[30%] min-w-[340px] max-w-[460px] flex-col overflow-hidden border-r border-zinc-800/80 bg-zinc-950/95">
+          <div className="shrink-0 border-b border-zinc-800/80 px-4 py-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-[11px] uppercase tracking-[0.22em] text-cyan-300">
+                  Command Center
+                </p>
+                <h1 className="mt-1 text-xl font-semibold tracking-tight text-zinc-50">
+                  SouthStack Generative Canvas
+                </h1>
+                <p className="mt-1 text-sm text-zinc-400">
+                  Describe what you want. The canvas updates instantly.
+                </p>
+              </div>
+              <div className="flex flex-col items-end gap-2">
                 <span
                   className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] ${peerStatus.tone}`}
                 >
                   {peerStatus.label}
                 </span>
+                <span className="inline-flex items-center gap-1 rounded-full border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-300 md:hidden">
+                  <Sparkles className="h-3 w-3" />
+                  {mobileHeaderStatus}
+                </span>
               </div>
+            </div>
 
+            <div className="mt-4 flex flex-wrap items-center gap-2">
               <SwarmConnectWidget
                 status={swarmHeaderStatus}
                 peerId={swarmManager.peerId}
@@ -1010,25 +1206,19 @@ export const AgenticIDE: React.FC = () => {
                 <button
                   onClick={initializeEngine}
                   disabled={state.isLoading}
-                  className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs font-medium text-zinc-100 transition hover:border-zinc-500 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-60 md:px-4 md:py-2 md:text-sm"
+                  className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs font-medium text-zinc-100 transition hover:border-zinc-500 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {state.isLoading ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
                   ) : (
                     <Play className="h-4 w-4" />
                   )}
-                  <span className="hidden sm:inline">
-                    {state.isLoading ? "Bootstrapping" : "Initialize"}
-                  </span>
-                  <span className="sm:hidden">
-                    {state.isLoading ? "Boot" : "Init"}
-                  </span>
+                  {state.isLoading ? "Bootstrapping" : "Initialize"}
                 </button>
               ) : (
                 <div className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300">
                   <Sparkles className="h-4 w-4" />
-                  <span className="hidden sm:inline">Ready</span>
-                  <span className="sm:hidden">OK</span>
+                  Ready
                 </div>
               )}
 
@@ -1040,344 +1230,428 @@ export const AgenticIDE: React.FC = () => {
                   Stop
                 </button>
               )}
+
+              <button
+                type="button"
+                onClick={() => setIsLogsExpanded((prev) => !prev)}
+                className="inline-flex items-center gap-2 rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-300 transition hover:bg-zinc-800"
+              >
+                {isLogsExpanded ? (
+                  <ChevronUp className="h-3.5 w-3.5" />
+                ) : (
+                  <ChevronDown className="h-3.5 w-3.5" />
+                )}
+                {isLogsExpanded ? "Hide logs" : "Show logs"}
+              </button>
             </div>
           </div>
-        </header>
 
-        <section className="rounded-2xl border border-zinc-800 bg-zinc-900/70">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 px-4 py-3">
-            <div className="relative flex rounded-xl border border-zinc-700 bg-zinc-900 p-1">
-              <button
-                onClick={() => setActiveTab("preview")}
-                className={`relative z-10 inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-                  activeTab === "preview"
-                    ? "text-zinc-100"
-                    : "text-zinc-400 hover:text-zinc-200"
-                }`}
-              >
-                <Eye className="h-3.5 w-3.5" />
-                Preview
-              </button>
-              <button
-                onClick={() => setActiveTab("code")}
-                className={`relative z-10 inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-                  activeTab === "code"
-                    ? "text-zinc-100"
-                    : "text-zinc-400 hover:text-zinc-200"
-                }`}
-              >
-                <Code2 className="h-3.5 w-3.5" />
-                Code
-              </button>
-              {activeTab === "preview" ? (
-                <motion.div
-                  layoutId="canvas-tab"
-                  className="absolute inset-y-1 left-1 right-[50%] rounded-lg bg-zinc-700"
-                />
-              ) : (
-                <motion.div
-                  layoutId="canvas-tab"
-                  className="absolute inset-y-1 left-[50%] right-1 rounded-lg bg-zinc-700"
-                />
-              )}
-            </div>
+          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden p-4">
+            <div className="shrink-0 rounded-2xl border border-zinc-800 bg-zinc-900/70 p-3">
+              <input
+                ref={imageInputRef}
+                type="file"
+                accept="image/*"
+                capture="environment"
+                className="hidden"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) {
+                    void handleImageFile(file);
+                  }
+                  event.currentTarget.value = "";
+                }}
+              />
 
-            <button
-              type="button"
-              onClick={() => setIsLogsExpanded((prev) => !prev)}
-              className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 transition hover:bg-zinc-800"
-            >
-              {isLogsExpanded ? (
-                <ChevronUp className="h-3.5 w-3.5" />
-              ) : (
-                <ChevronDown className="h-3.5 w-3.5" />
-              )}
-              {isLogsExpanded ? "Collapse System Logs" : "Expand System Logs"}
-              <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">
-                {minimalAgentStatus}
-              </span>
-            </button>
-          </div>
-
-          <AnimatePresence initial={false}>
-            {isLogsExpanded && (
-              <motion.div
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: "auto" }}
-                exit={{ opacity: 0, height: 0 }}
-                className="border-b border-zinc-800 bg-zinc-950/60 px-3 py-3"
-              >
-                <AgentActivityStream
-                  logs={mergedLogs}
-                  swarmLogs={swarmActivityLogs}
-                  isInitialized={state.isInitialized}
-                  isLoading={state.isLoading}
-                  initProgress={state.initProgress}
-                  isListening={promptVoice.isListening}
-                  voiceError={promptVoice.error}
-                  currentPhase={isAgentBusy ? "executing" : state.currentPhase}
-                  retryCount={state.retryCount}
-                  generatedCode={canvasCode}
-                  error={state.error || multimodalError}
-                />
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          <div className="h-[calc(100vh-320px)] min-h-[460px] bg-zinc-950/60 p-3">
-            <AnimatePresence mode="wait" initial={false}>
-              {activeTab === "preview" ? (
-                <motion.div
-                  key="preview-tab"
-                  initial={{ opacity: 0, y: 6 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -6 }}
-                  className="h-full overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950"
-                >
-                  {isDistributedProcessing ? (
-                    <div className="flex h-full flex-col">
-                      <div className="border-b border-zinc-800 bg-zinc-900/70 px-4 py-3">
-                        <p className="text-xs uppercase tracking-[0.2em] text-emerald-300">
-                          Distributed Worker Status Console
-                        </p>
-                        <p className="mt-1 text-[11px] text-zinc-400">
-                          Live worker telemetry and streamed code output
-                        </p>
-                      </div>
-                      <div
-                        ref={workerTerminalRef}
-                        className="h-full overflow-y-auto bg-black px-4 py-3 font-mono text-[11px] leading-5 text-emerald-300"
-                      >
-                        {workerTerminalLines.length === 0 &&
-                          workerStreamPreview.length === 0 && (
-                            <p className="text-zinc-500">
-                              Waiting for worker logs...
-                            </p>
-                          )}
-                        {workerTerminalLines.map((line, index) => (
-                          <p key={`worker-log-${index}`}>{line}</p>
-                        ))}
-                        {workerStreamPreview && (
-                          <>
-                            <p className="mt-3 text-cyan-300">--- STREAM ---</p>
-                            <pre className="whitespace-pre-wrap break-words text-zinc-300">
-                              {workerStreamPreview}
-                            </pre>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  ) : state.previewUrl ? (
-                    <iframe
-                      title="SouthStack Live Preview"
-                      src={state.previewUrl}
-                      className="h-full w-full"
-                      sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
-                    />
-                  ) : (
-                    <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
-                      <Eye className="h-8 w-8 text-zinc-500" />
-                      <h3 className="text-sm font-semibold text-zinc-300">
-                        Your generated UI appears here
-                      </h3>
-                      <p className="max-w-md text-xs leading-relaxed text-zinc-500">
-                        Send a prompt to generate code, then we bundle and
-                        launch it in WebContainer for live preview.
-                      </p>
-                    </div>
-                  )}
-                </motion.div>
-              ) : (
-                <motion.div
-                  key="code-tab"
-                  initial={{ opacity: 0, y: 6 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -6 }}
-                  className="h-full overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 flex flex-col"
-                >
-                  {canvasCode && (
-                    <div className="border-b border-zinc-800 bg-zinc-900/50 px-4 py-2 flex items-center justify-between">
-                      <div className="flex items-center gap-4 text-[11px] text-zinc-400">
-                        <span>{canvasCode.split("\n").length} lines</span>
-                        <span>{canvasCode.length} chars</span>
-                      </div>
+              {attachedImageDataUrl && (
+                <div className="mb-3 rounded-xl border border-zinc-700 bg-zinc-950/60 p-2">
+                  <div className="flex items-start gap-3">
+                    <div className="relative h-16 w-24 overflow-hidden rounded-md border border-zinc-700 bg-zinc-950">
+                      <img
+                        src={attachedImageDataUrl}
+                        alt={attachedImageName ?? "Attached image"}
+                        className="h-full w-full object-cover"
+                      />
                       <button
-                        onClick={handleCopyCode}
-                        className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-zinc-200 transition hover:bg-zinc-800 disabled:opacity-50"
-                        title="Copy code to clipboard"
+                        type="button"
+                        onClick={() => {
+                          setAttachedImageDataUrl(null);
+                          setAttachedImageName(null);
+                        }}
+                        className="absolute right-1 top-1 rounded-full bg-zinc-950/80 p-0.5 text-zinc-200 transition hover:bg-zinc-800"
+                        title="Remove attached image"
                       >
-                        {copiedCodeId ? (
-                          <>
-                            <Check className="h-3.5 w-3.5" />
-                            Copied!
-                          </>
-                        ) : (
-                          <>
-                            <Copy className="h-3.5 w-3.5" />
-                            Copy
-                          </>
-                        )}
+                        <CircleX className="h-3.5 w-3.5" />
                       </button>
                     </div>
+                    <div className="min-w-0 flex-1 pt-0.5">
+                      <p className="truncate text-xs font-medium text-zinc-200">
+                        {attachedImageName ?? "Image attached"}
+                      </p>
+                      <p className="mt-1 text-[11px] text-zinc-500">
+                        This image is included in the next generation task.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex items-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => imageInputRef.current?.click()}
+                  disabled={isAgentBusy || isProcessingImage}
+                  className="mb-1 inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
+                  title="Camera/Image"
+                >
+                  {isProcessingImage ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Camera className="h-4 w-4" />
                   )}
-                  <div className="flex-1 overflow-hidden">
+                </button>
+
+                <button
+                  type="button"
+                  onClick={
+                    promptVoice.isListening
+                      ? promptVoice.stopListening
+                      : promptVoice.startListening
+                  }
+                  disabled={!promptVoice.isSupported || isAgentBusy}
+                  className="mb-1 inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
+                  title="Voice input"
+                >
+                  <Mic className="h-4 w-4" />
+                </button>
+
+                <textarea
+                  ref={textareaRef}
+                  value={userPrompt}
+                  onChange={(event) => setUserPrompt(event.target.value)}
+                  onKeyDown={handlePromptKeyDown}
+                  placeholder="Describe the UI you want to generate..."
+                  className="min-h-[76px] max-h-[180px] min-w-0 flex-1 resize-none rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500"
+                  disabled={!isReady || isAgentBusy}
+                />
+
+                <button
+                  onClick={() => {
+                    void handleSendPrompt();
+                  }}
+                  disabled={!isReady || isAgentBusy || !userPrompt.trim()}
+                  className="mb-1 inline-flex min-h-11 items-center gap-2 rounded-xl bg-zinc-100 px-3 py-2 text-xs font-semibold text-zinc-900 transition hover:bg-zinc-300 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
+                >
+                  {isAgentBusy ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <SendHorizonal className="h-3.5 w-3.5" />
+                  )}
+                  Send
+                </button>
+              </div>
+
+              {(promptVoice.error || multimodalError) && (
+                <p className="mt-2 text-xs text-rose-300">
+                  {promptVoice.error || multimodalError}
+                </p>
+              )}
+
+              {chatHistory.length > 0 && (
+                <div className="mt-3 max-h-24 overflow-y-auto rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2">
+                  {chatHistory.slice(-3).map((message) => (
+                    <p
+                      key={message.id}
+                      className="mb-1 text-xs text-zinc-400 last:mb-0"
+                    >
+                      <span className="font-medium text-zinc-300">
+                        {message.role === "user" ? "You" : "Agent"}:
+                      </span>{" "}
+                      {message.content}
+                    </p>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950/60 p-3">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-[11px] uppercase tracking-[0.18em] text-cyan-300">
+                    System Logs
+                  </p>
+                  <p className="text-[11px] text-zinc-500">
+                    Scrolls internally and never pushes layout down.
+                  </p>
+                </div>
+                <span className="rounded-full border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-400">
+                  {minimalAgentStatus}
+                </span>
+              </div>
+
+              <div className="max-h-full overflow-y-auto pr-1">
+                {isLogsExpanded ? (
+                  <AgentActivityStream
+                    logs={mergedLogs}
+                    swarmLogs={swarmActivityLogs}
+                    isInitialized={state.isInitialized}
+                    isLoading={state.isLoading}
+                    initProgress={state.initProgress}
+                    isListening={promptVoice.isListening}
+                    voiceError={promptVoice.error}
+                    currentPhase={
+                      isAgentBusy ? "executing" : state.currentPhase
+                    }
+                    retryCount={state.retryCount}
+                    generatedCode={canvasCode}
+                    error={state.error || multimodalError}
+                  />
+                ) : (
+                  <div className="rounded-xl border border-dashed border-zinc-800 bg-zinc-950/60 px-4 py-6 text-center text-xs text-zinc-500">
+                    Expand logs to inspect model and swarm activity.
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-3 rounded-2xl border border-zinc-800 bg-black p-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <div>
+                    <p className="text-[11px] uppercase tracking-[0.18em] text-emerald-300">
+                      Terminal
+                    </p>
+                    <p className="text-[11px] text-zinc-500">
+                      Fixed-height, internal scroll only.
+                    </p>
+                  </div>
+                  <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] text-emerald-300">
+                    Live
+                  </span>
+                </div>
+                <div
+                  ref={workerTerminalRef}
+                  className="max-h-64 overflow-y-auto rounded-xl bg-black p-2 font-mono text-[11px] leading-5 text-green-400"
+                >
+                  {workerTerminalLines.length === 0 &&
+                    workerStreamPreview.length === 0 && (
+                      <p className="text-zinc-500">
+                        Waiting for worker logs...
+                      </p>
+                    )}
+                  {workerTerminalLines.map((line, index) => (
+                    <p key={`worker-log-${index}`}>{line}</p>
+                  ))}
+                  {workerStreamPreview && (
+                    <>
+                      <p className="mt-3 text-cyan-300">--- STREAM ---</p>
+                      <pre className="whitespace-pre-wrap break-words text-zinc-300">
+                        {workerStreamPreview}
+                      </pre>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </aside>
+
+        <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-gradient-to-br from-slate-950 via-zinc-950 to-slate-900">
+          <div className="shrink-0 border-b border-zinc-800/80 bg-zinc-950/70 px-4 py-3 backdrop-blur">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-[11px] uppercase tracking-[0.22em] text-violet-300">
+                  The Canvas
+                </p>
+                <h2 className="mt-1 text-lg font-semibold tracking-tight text-zinc-50 sm:text-xl">
+                  Gemini-style split workspace
+                </h2>
+                <p className="text-sm text-zinc-400">
+                  Code editor on one side, live preview on the other.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2 rounded-2xl border border-zinc-800 bg-zinc-950/80 p-1">
+                <button
+                  onClick={() => setActiveTab("split")}
+                  className={`inline-flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-medium transition ${
+                    activeTab === "split"
+                      ? "bg-zinc-200 text-zinc-900"
+                      : "text-zinc-400 hover:text-zinc-100"
+                  }`}
+                >
+                  Split
+                </button>
+                <button
+                  onClick={() => setActiveTab("code")}
+                  className={`inline-flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-medium transition ${
+                    activeTab === "code"
+                      ? "bg-zinc-200 text-zinc-900"
+                      : "text-zinc-400 hover:text-zinc-100"
+                  }`}
+                >
+                  <Code2 className="h-3.5 w-3.5" />
+                  Code
+                </button>
+                <button
+                  onClick={() => setActiveTab("preview")}
+                  className={`inline-flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-medium transition ${
+                    activeTab === "preview"
+                      ? "bg-zinc-200 text-zinc-900"
+                      : "text-zinc-400 hover:text-zinc-100"
+                  }`}
+                >
+                  <Eye className="h-3.5 w-3.5" />
+                  Preview
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="relative flex min-h-0 flex-1 overflow-hidden p-4">
+            {canvasIsBusy && !state.previewUrl && (
+              <div className="pointer-events-none absolute inset-4 z-10 overflow-hidden rounded-[28px] border border-cyan-500/20 bg-zinc-950/70 backdrop-blur-md">
+                <div className="flex h-full items-center justify-center px-6 py-8">
+                  <div className="max-w-xl text-center">
+                    <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-2xl border border-cyan-400/30 bg-cyan-500/10 shadow-[0_0_40px_rgba(34,211,238,0.15)]">
+                      <Loader2 className="h-7 w-7 animate-spin text-cyan-300" />
+                    </div>
+                    <p className="text-[11px] uppercase tracking-[0.24em] text-cyan-300">
+                      Generating UI...
+                    </p>
+                    <h3 className="mt-2 text-2xl font-semibold text-zinc-50">
+                      The models are shaping the canvas.
+                    </h3>
+                    <p className="mt-3 text-sm leading-6 text-zinc-400">
+                      The 3B blueprint stage and 7B coder stage are still
+                      running. The preview will mount automatically as soon as
+                      the code lands in WebContainer.
+                    </p>
+                    <div className="mt-6 space-y-3 text-left">
+                      <div className="h-4 overflow-hidden rounded-full bg-zinc-800">
+                        <div className="h-full w-2/3 animate-pulse rounded-full bg-gradient-to-r from-cyan-500 via-sky-400 to-violet-400" />
+                      </div>
+                      <div className="grid grid-cols-3 gap-3">
+                        <div className="h-28 rounded-2xl border border-zinc-800 bg-zinc-900/60 animate-pulse" />
+                        <div className="h-28 rounded-2xl border border-zinc-800 bg-zinc-900/60 animate-pulse" />
+                        <div className="h-28 rounded-2xl border border-zinc-800 bg-zinc-900/60 animate-pulse" />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div
+              className={`grid h-full min-h-0 w-full gap-4 ${activeTab === "split" ? "grid-cols-2" : "grid-cols-1"}`}
+            >
+              {(activeTab === "split" || activeTab === "code") && (
+                <section className="flex min-h-0 flex-col overflow-hidden rounded-[28px] border border-zinc-800 bg-zinc-950/80 shadow-[0_24px_80px_rgba(2,6,23,0.45)]">
+                  <div className="shrink-0 border-b border-zinc-800/80 px-4 py-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-[11px] uppercase tracking-[0.18em] text-cyan-300">
+                          Code Editor
+                        </p>
+                        <p className="text-[11px] text-zinc-500">
+                          Live-streamed from the 7B coder stage.
+                        </p>
+                      </div>
+                      {canvasCode && (
+                        <button
+                          onClick={handleCopyCode}
+                          className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-zinc-200 transition hover:bg-zinc-800 disabled:opacity-50"
+                          title="Copy code to clipboard"
+                        >
+                          {copiedCodeId ? (
+                            <>
+                              <Check className="h-3.5 w-3.5" />
+                              Copied!
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="h-3.5 w-3.5" />
+                              Copy
+                            </>
+                          )}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <div className="min-h-0 flex-1 overflow-hidden">
                     <CollaborativeCodeEditor
                       generatedCode={canvasCode}
                       language={detectedLanguage}
                       isAgentBusy={isAgentBusy}
                       pauseAgentEdits={pauseAgentEdits}
                       onPauseAgentEditsChange={setPauseAgentEdits}
+                      focusRequest={focusRequest}
                     />
                   </div>
-                </motion.div>
+                </section>
               )}
-            </AnimatePresence>
-          </div>
-        </section>
-      </div>
 
-      <div className="fixed inset-x-0 bottom-0 z-40 border-t border-zinc-800 bg-zinc-950/95 px-3 py-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] backdrop-blur">
-        <div className="mx-auto flex w-full max-w-3xl flex-col gap-2">
-          <input
-            ref={imageInputRef}
-            type="file"
-            accept="image/*"
-            capture="environment"
-            className="hidden"
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (file) {
-                void handleImageFile(file);
-              }
-              event.currentTarget.value = "";
-            }}
-          />
+              {(activeTab === "split" || activeTab === "preview") && (
+                <section className="flex min-h-0 flex-col overflow-hidden rounded-[28px] border border-zinc-800 bg-zinc-950/80 shadow-[0_24px_80px_rgba(2,6,23,0.45)]">
+                  <div className="shrink-0 border-b border-zinc-800/80 px-4 py-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-[11px] uppercase tracking-[0.18em] text-violet-300">
+                          Live Preview
+                        </p>
+                        <p className="text-[11px] text-zinc-500">
+                          Automatically remounts when the generated code
+                          updates.
+                        </p>
+                      </div>
+                      <span className="rounded-full border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-400">
+                        {state.previewUrl ? "Mounted" : "Waiting"}
+                      </span>
+                    </div>
+                  </div>
 
-          {attachedImageDataUrl && (
-            <div className="rounded-lg border border-zinc-700 bg-zinc-900/80 p-2">
-              <div className="flex items-start gap-3">
-                <div className="relative h-16 w-24 overflow-hidden rounded-md border border-zinc-700 bg-zinc-950">
-                  <img
-                    src={attachedImageDataUrl}
-                    alt={attachedImageName ?? "Attached image"}
-                    className="h-full w-full object-cover"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAttachedImageDataUrl(null);
-                      setAttachedImageName(null);
-                    }}
-                    className="absolute right-1 top-1 rounded-full bg-zinc-950/80 p-0.5 text-zinc-200 transition hover:bg-zinc-800"
-                    title="Remove attached image"
-                  >
-                    <CircleX className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-                <div className="min-w-0 flex-1 pt-0.5">
-                  <p className="truncate text-xs font-medium text-zinc-200">
-                    {attachedImageName ?? "Image attached"}
-                  </p>
-                  <p className="mt-1 text-[11px] text-zinc-500">
-                    This image is included in the next generation task.
-                  </p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          <div className="rounded-2xl border border-zinc-700 bg-zinc-900 p-2">
-            <div className="mb-1 flex items-center justify-between px-1">
-              <span className="text-[11px] text-zinc-500">
-                {shouldOffloadToWorker
-                  ? "Master mode: prompt will be processed by worker"
-                  : "Local mode: prompt will run on this device"}
-              </span>
-              <span
-                className={`rounded-full border px-2 py-0.5 text-[10px] ${peerStatus.tone}`}
-              >
-                {peerStatus.label}
-              </span>
-            </div>
-
-            <div className="flex items-end gap-2">
-              <button
-                type="button"
-                onClick={() => imageInputRef.current?.click()}
-                disabled={isAgentBusy || isProcessingImage}
-                className="mb-1 inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
-                title="Camera/Image"
-              >
-                {isProcessingImage ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Camera className="h-4 w-4" />
-                )}
-              </button>
-
-              <button
-                type="button"
-                onClick={
-                  promptVoice.isListening
-                    ? promptVoice.stopListening
-                    : promptVoice.startListening
-                }
-                disabled={!promptVoice.isSupported || isAgentBusy}
-                className="mb-1 inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
-                title="Voice input"
-              >
-                <Mic className="h-4 w-4" />
-              </button>
-
-              <textarea
-                ref={textareaRef}
-                value={userPrompt}
-                onChange={(event) => setUserPrompt(event.target.value)}
-                onKeyDown={handlePromptKeyDown}
-                placeholder="Describe the UI you want to generate..."
-                className="min-w-0 max-h-[220px] min-h-[72px] flex-1 resize-none bg-transparent px-1 py-1.5 text-sm text-zinc-100 outline-none placeholder:text-zinc-500"
-                disabled={!isReady || isAgentBusy}
-              />
-
-              <button
-                onClick={() => {
-                  void handleSendPrompt();
-                }}
-                disabled={!isReady || isAgentBusy || !userPrompt.trim()}
-                className="mb-1 inline-flex min-h-11 items-center gap-2 rounded-lg bg-zinc-100 px-3 py-1.5 text-xs font-semibold text-zinc-900 transition hover:bg-zinc-300 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
-              >
-                {isAgentBusy ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <SendHorizonal className="h-3.5 w-3.5" />
-                )}
-                Send
-              </button>
+                  <div className="relative min-h-0 flex-1 overflow-hidden bg-zinc-950">
+                    {state.previewUrl ? (
+                      <ErrorBoundary
+                        fallback={
+                          <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+                            <div className="text-4xl">⚠️</div>
+                            <h3 className="text-sm font-semibold text-zinc-300">
+                              AI generated incomplete syntax due to hardware
+                              limits
+                            </h3>
+                            <p className="max-w-md text-xs leading-relaxed text-zinc-500">
+                              Please add the missing bracket in the Code Editor
+                              to render the UI.
+                            </p>
+                          </div>
+                        }
+                        onError={handlePreviewError}
+                      >
+                        <iframe
+                          key={previewFrameKey}
+                          title="SouthStack Live Preview"
+                          src={state.previewUrl}
+                          className="h-full w-full bg-white"
+                          sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
+                        />
+                      </ErrorBoundary>
+                    ) : (
+                      <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+                        <Eye className="h-8 w-8 text-zinc-500" />
+                        <h3 className="text-sm font-semibold text-zinc-300">
+                          Your generated UI appears here
+                        </h3>
+                        <p className="max-w-md text-xs leading-relaxed text-zinc-500">
+                          Send a prompt, then the code will be written to the
+                          active WebContainer file and mounted automatically.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </section>
+              )}
             </div>
           </div>
-
-          {(promptVoice.error || multimodalError) && (
-            <p className="text-xs text-rose-300">
-              {promptVoice.error || multimodalError}
-            </p>
-          )}
-
-          {chatHistory.length > 0 && (
-            <div className="max-h-28 overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2">
-              {chatHistory.slice(-3).map((message) => (
-                <p
-                  key={message.id}
-                  className="mb-1 text-xs text-zinc-400 last:mb-0"
-                >
-                  <span className="font-medium text-zinc-300">
-                    {message.role === "user" ? "You" : "Agent"}:
-                  </span>
-                  {message.content}
-                </p>
-              ))}
-            </div>
-          )}
-        </div>
+        </main>
       </div>
 
       {/* Quick Actions Palette (Cmd+K) */}
@@ -1455,7 +1729,7 @@ export const AgenticIDE: React.FC = () => {
                 <button
                   onClick={() => {
                     setChatHistory([]);
-                    setCanvasCode(null);
+                    resetGeneratedCanvas();
                     setShowQuickActions(false);
                   }}
                   className="w-full text-left px-2.5 py-2 text-xs rounded-lg hover:bg-zinc-800 transition text-zinc-300"

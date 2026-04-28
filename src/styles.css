@@ -1,15 +1,13 @@
-@import 'tailwindcss/base';
-@import 'tailwindcss/components';
-@import 'tailwindcss/utilities';
+@import "tailwindcss/base";
+@import "tailwindcss/components";
+@import "tailwindcss/utilities";
 
 /* XTerm CSS - REQUIRED for terminal rendering */
-@import '@xterm/xterm/css/xterm.css';
-
-/* Professional IDE Fonts */
-@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import "@xterm/xterm/css/xterm.css";
 
 :root {
-  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  font-family:
+    "Segoe UI", "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
   line-height: 1.5;
   font-weight: 400;
 
@@ -27,6 +25,14 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  overflow: hidden;
+  background: #020617;
+}
+
+#root {
+  height: 100vh;
+  width: 100%;
+  overflow: hidden;
 }
 
 /* Custom scrollbar for dark theme */
@@ -50,12 +56,13 @@ body {
 
 /* Code block styling */
 pre {
-  font-family: 'Fira Code', 'Courier New', monospace;
+  font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
 }
 
 /* Animations */
 @keyframes pulse-slow {
-  0%, 100% {
+  0%,
+  100% {
     opacity: 1;
   }
   50% {

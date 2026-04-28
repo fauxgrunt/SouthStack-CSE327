@@ -2,35 +2,33 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import * as webllm from "@mlc-ai/web-llm";
 import { detectDeviceCapability, limitArraySize } from "../utils/performance";
 import { webContainerService } from "../services/webcontainer";
+import { autoCloseJsx } from "../utils/jsxAutoFixer";
 
 // Model Configuration - worker-first preference for stronger code generation
-export type ModelType = "1.5B" | "3B" | "0.5B";
+export type ModelType = "3B" | "7B";
 
 // Maximum number of logs to keep in memory (prevent memory leaks)
 const MAX_LOG_ENTRIES = 500;
 
-export const MODEL_CONFIGS = {
-  "1.5B": {
-    id: "Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC",
-    label: "Worker Preferred (1.5B)",
-    description: "Balanced quality for distributed worker generation",
-    minStorage: 1.6 * 1024 * 1024 * 1024,
-  },
+export const MODEL_CONFIGS = Object.freeze({
   "3B": {
     id: "Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC",
-    label: "Worker Fallback (3B)",
-    description: "Higher quality fallback when available",
+    label: "Vision Blueprint Model (3B)",
+    description: "Stage 1 blueprint extraction for image-led requests",
     minStorage: 3.2 * 1024 * 1024 * 1024,
   },
-  "0.5B": {
-    id: "Qwen2.5-Coder-0.5B-Instruct-q4f16_1-MLC",
-    label: "Emergency Fallback (0.5B)",
-    description: "Last-resort lightweight fallback model",
-    minStorage: 600 * 1024 * 1024, // 600MB
+  "7B": {
+    id: "Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC",
+    label: "React Coder Model (7B)",
+    description: "Stage 2 React generation for finalized UI code",
+    minStorage: 7 * 1024 * 1024 * 1024,
   },
-};
+});
 
-const WORKER_MODEL_PREFERENCE: ModelType[] = ["1.5B", "3B", "0.5B"];
+const STRICT_MODEL_LOAD_ERRORS: Record<ModelType, string> = {
+  "3B": "INSUFFICIENT VRAM: Cannot load 3B Vision Blueprint Model",
+  "7B": "INSUFFICIENT VRAM: Cannot load 7B Coder Model",
+};
 
 // Types
 interface AgenticLoopState {
@@ -82,17 +80,17 @@ interface InferenceProfile {
   runBuildValidation: boolean;
 }
 
-interface GeminiLikeUiSpec {
+interface EdgeVisionV1UiSpec {
   version: "1.0";
   title: string;
   subtitle?: string;
-  sections: GeminiLikeUiSection[];
+  sections: EdgeVisionV1UiSection[];
   cta?: {
     label: string;
   };
 }
 
-interface GeminiLikeUiSection {
+interface EdgeVisionV1UiSection {
   id: string;
   type: "hero" | "cards" | "stats" | "features" | "timeline" | "faq";
   heading: string;
@@ -109,15 +107,6 @@ const LLM_COMPLETION_TIMEOUT_MS = 25000;
 const PREWARM_BOOT_TIMEOUT_MS = 45000;
 const MAX_UI_SPEC_SECTIONS = 8;
 const MAX_UI_SPEC_ITEMS = 6;
-const GENERIC_TEMPLATE_MARKERS = [
-  "visual fidelity target",
-  "prompt-aligned layout",
-  "fast reference-based preview while full generation completes.",
-  "generated ui",
-  "overview",
-  "detail panel",
-  "recent activity",
-];
 let sharedEngineInstance: webllm.MLCEngine | null = null;
 let sharedEngineInitPromise: Promise<webllm.MLCEngine> | null = null;
 
@@ -131,6 +120,23 @@ function isDisposedEngineError(error: unknown): boolean {
   return /disposed|already been disposed|engine has been disposed/i.test(
     message,
   );
+}
+
+async function releaseEngineMemory(engine: webllm.MLCEngine): Promise<void> {
+  const cleanupEngine = engine as webllm.MLCEngine & {
+    unload?: () => Promise<void> | void;
+    destroy?: () => Promise<void> | void;
+  };
+
+  if (typeof cleanupEngine.unload === "function") {
+    await cleanupEngine.unload();
+  } else if (typeof cleanupEngine.destroy === "function") {
+    await cleanupEngine.destroy();
+  }
+
+  await new Promise<void>((resolve) => {
+    window.setTimeout(() => resolve(), 1000);
+  });
 }
 
 /**
@@ -153,7 +159,7 @@ export const useAgenticLoop = () => {
     generatedCode: null,
     error: null,
     retryCount: 0,
-    selectedModel: "1.5B",
+    selectedModel: "7B",
     storageAvailable: null,
     previewUrl: null,
   });
@@ -171,7 +177,6 @@ export const useAgenticLoop = () => {
   const inferenceProfileRef = useRef<InferenceProfile>(
     buildInferenceProfile("medium", true),
   );
-  const liteModeRef = useRef(false);
   const isGeneratingRef = useRef(false);
 
   const getSharedEngine = useCallback(async () => {
@@ -217,6 +222,46 @@ export const useAgenticLoop = () => {
     [],
   );
 
+  const reloadLockedModel = useCallback(
+    async (modelType: ModelType, phase: string): Promise<void> => {
+      const engine = engineRef.current;
+      if (!engine) {
+        throw new Error("WebLLM engine is not initialized.");
+      }
+
+      const modelConfig = MODEL_CONFIGS[modelType];
+
+      try {
+        await engine.reload(modelConfig.id, {
+          context_window_size: inferenceProfileRef.current.contextWindowSize,
+        });
+        setState((prev) => ({ ...prev, selectedModel: modelType }));
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        const normalizedMessage =
+          /vram|memory|allocation|out of memory|webgpu/i.test(errorMessage)
+            ? STRICT_MODEL_LOAD_ERRORS[modelType]
+            : `Failed to load ${modelConfig.label}: ${errorMessage}`;
+
+        addLog(phase, normalizedMessage, "error");
+        throw new Error(normalizedMessage);
+      }
+    },
+    [addLog],
+  );
+
+  const resetGeneratedCanvas = useCallback((): void => {
+    setState((prev) => ({
+      ...prev,
+      generatedCode: null,
+      previewUrl: null,
+      error: null,
+      currentPhase: "idle",
+      isExecuting: false,
+    }));
+  }, []);
+
   /**
    * Check available storage (informational only)
    */
@@ -239,7 +284,7 @@ export const useAgenticLoop = () => {
           // Less than 1GB
           addLog(
             "storage",
-            "Low storage detected. 0.5B model requires ~600MB.",
+            "Low storage detected. The 3B blueprint model requires ~3.2GB and the 7B coder model requires substantially more.",
             "warning",
           );
         }
@@ -427,7 +472,8 @@ export const useAgenticLoop = () => {
     }
   }, [addLog, ensureWebContainerReady]);
 
-  // Model change functionality removed - 0.5B is the only available model
+  // Model selection is intentionally strict: the active pipeline only uses the
+  // 3B blueprint stage and the 7B coder stage.
 
   /**
    * Initialize WebLLM Engine with WebGPU error handling
@@ -460,20 +506,33 @@ export const useAgenticLoop = () => {
         hasWebGPU,
       );
 
-      const isLowEndRuntime = !hasWebGPU;
-
       addLog(
         "initialization",
         `Performance profile: ${inferenceProfileRef.current.name}`,
         "info",
       );
 
+      addLog(
+        "initialization",
+        hasWebGPU
+          ? "[OK] WebGPU detected via navigator.gpu."
+          : "[ERROR] WebGPU is unavailable in this browser. UI generation requires a WebGPU-capable runtime.",
+        hasWebGPU ? "success" : "error",
+      );
+
+      addLog(
+        "initialization",
+        typeof SharedArrayBuffer !== "undefined"
+          ? "[OK] SharedArrayBuffer is available. WebContainer preview can boot with COOP/COEP isolation."
+          : "[ERROR] SharedArrayBuffer is unavailable. WebContainer preview will fail until COOP/COEP headers enable cross-origin isolation.",
+        typeof SharedArrayBuffer !== "undefined" ? "success" : "error",
+      );
+
       // Warm runtime asynchronously so engine readiness is not blocked by WebContainer boot.
       addLog("initialization", "Warming WebContainer in background...", "info");
       void ensureWebContainerReady(WEBCONTAINER_WARMUP_TIMEOUT_MS, "warmup");
 
-      if (isLowEndRuntime) {
-        liteModeRef.current = true;
+      if (!hasWebGPU) {
         engineRef.current = null;
         const lowEndMessage =
           "WebGPU unavailable on this device. UI generation requires a WebGPU-capable worker node.";
@@ -515,50 +574,18 @@ export const useAgenticLoop = () => {
         addLog("initialization", report.text, "info");
       });
 
-      // Load preferred worker model with fallback chain (1.5B -> 3B -> 0.5B)
-      let loadedModelType: ModelType | null = null;
-      let lastLoadError: unknown = null;
+      const coderModelConfig = MODEL_CONFIGS["7B"];
+      addLog(
+        "initialization",
+        `Loading ${coderModelConfig.label} for the final React generation stage...`,
+        "info",
+      );
 
-      for (const modelType of WORKER_MODEL_PREFERENCE) {
-        const modelConfig = MODEL_CONFIGS[modelType];
-        addLog(
-          "initialization",
-          `Attempting model: ${modelConfig.label}`,
-          "info",
-        );
-
-        try {
-          await engine.reload(modelConfig.id, {
-            context_window_size: inferenceProfileRef.current.contextWindowSize,
-          });
-          loadedModelType = modelType;
-          setState((prev) => ({ ...prev, selectedModel: modelType }));
-          break;
-        } catch (loadError: unknown) {
-          lastLoadError = loadError;
-          const message =
-            loadError instanceof Error ? loadError.message : String(loadError);
-          addLog(
-            "initialization",
-            `Model ${modelConfig.label} unavailable: ${message}. Trying fallback...`,
-            "warning",
-          );
-        }
-      }
-
-      if (!loadedModelType) {
-        const message =
-          lastLoadError instanceof Error
-            ? lastLoadError.message
-            : String(lastLoadError || "Unknown model load error");
-        throw new Error(
-          `All worker model candidates failed to load. ${message}`,
-        );
-      }
+      await reloadLockedModel("7B", "initialization");
 
       addLog(
         "initialization",
-        `Worker engine ready with ${MODEL_CONFIGS[loadedModelType].label}.`,
+        `Worker engine ready with ${coderModelConfig.label}.`,
         "success",
       );
       setState((prev) => ({
@@ -592,6 +619,7 @@ export const useAgenticLoop = () => {
     getSharedEngine,
     prewarmPreviewRuntime,
     requestPersistentStorage,
+    reloadLockedModel,
   ]);
 
   /**
@@ -619,6 +647,7 @@ export const useAgenticLoop = () => {
         error: null,
         retryCount: 0,
         generatedCode: null,
+        previewUrl: null,
       }));
 
       let attempt = 0;
@@ -652,101 +681,224 @@ export const useAgenticLoop = () => {
             retryCount: attempt,
           }));
 
-          const systemPrompt = buildSystemPrompt(
-            ragContext,
-            state.selectedModel,
-          );
           const userMessage =
             attempt === 1
               ? userPrompt
               : buildFixPrompt(userPrompt, lastError!, currentCode!);
 
           const compactUserMessage = compactPromptForLowEnd(userMessage);
-
-          const {
-            userPrompt: boundedUserMessage,
-            wasTruncated,
-            estimatedPromptTokens,
-          } = fitPromptToContextWindow(systemPrompt, compactUserMessage, {
-            contextWindowSize: profile.contextWindowSize,
-            maxCompletionTokens: profile.maxCompletionTokens,
-            safetyMarginTokens: WEBLLM_CONTEXT_SAFETY_MARGIN,
-          });
-
-          if (wasTruncated) {
-            addLog(
-              "generation",
-              `[Warning] Prompt truncated to fit context window. (~${estimatedPromptTokens} prompt tokens)`,
-              "warning",
-            );
-          }
-
-          addLog(
-            "generation",
-            attempt === 1
-              ? `Generating code for: "${userPrompt}"`
-              : `Attempt ${attempt}: Self-correcting based on error...`,
-            "info",
-          );
+          const imageLedPrompt = isImageLedPrompt(userPrompt);
 
           try {
-            if (!engineRef.current || liteModeRef.current) {
+            if (!engineRef.current) {
               throw new Error(
                 "WebLLM engine unavailable for generation. Ensure a WebGPU-capable worker is initialized.",
               );
             }
 
-            {
-              const uiIntent = isUiIntentPrompt(boundedUserMessage);
+            if (imageLedPrompt) {
+              const visionSystemPrompt = `You are the 3B Vision Blueprint stage for SouthStack.
+Return exactly one JSON object and nothing else.
+Schema:
+{
+  "version": "1.0",
+  "title": "string",
+  "subtitle": "string (optional)",
+  "sections": [
+    {
+      "id": "string",
+      "type": "hero|cards|stats|features|timeline|faq",
+      "heading": "string",
+      "body": "string (optional)",
+      "items": ["string"]
+    }
+  ],
+  "cta": { "label": "string" }
+}
+Rules:
+- Preserve screenshot hierarchy and visible copy
+- Do not write JSX, HTML, markdown, or shell commands
+- Do not invent generic dashboard sections
+- Keep the output concise and directly usable as a React blueprint`;
 
-              if (attempt === 1 && uiIntent && profile.name !== "low") {
-                currentCode = await withTimeout(
-                  generateUiCodeFromStructuredSpec(
-                    engineRef.current,
-                    boundedUserMessage,
+              const visionWindow = fitPromptToContextWindow(
+                visionSystemPrompt,
+                compactUserMessage,
+                {
+                  contextWindowSize: profile.contextWindowSize,
+                  maxCompletionTokens: Math.min(
+                    768,
                     profile.maxCompletionTokens,
                   ),
-                  STRUCTURED_SPEC_TIMEOUT_MS,
-                );
+                  safetyMarginTokens: WEBLLM_CONTEXT_SAFETY_MARGIN,
+                },
+              );
 
-                if (currentCode) {
-                  addLog(
-                    "generation",
-                    "Structured UI architecture engaged: spec compiled to deterministic JSX.",
-                    "success",
-                  );
-                } else {
-                  addLog(
-                    "generation",
-                    "Structured spec phase timed out. Falling back to fast direct generation.",
-                    "warning",
-                  );
-                }
-              }
-
-              if (!currentCode) {
-                const completion = await withTimeout(
-                  engineRef.current.chat.completions.create({
-                    messages: [
-                      { role: "system", content: systemPrompt },
-                      { role: "user", content: boundedUserMessage },
-                    ],
-                    temperature: profile.temperature,
-                    max_tokens: profile.maxCompletionTokens,
-                  }),
-                  LLM_COMPLETION_TIMEOUT_MS,
-                );
-
-                if (!completion) {
-                  throw new Error(
-                    "Model completion timed out. Falling back to safe fast generation.",
-                  );
-                }
-
-                currentCode = extractCode(
-                  completion.choices[0].message.content || "",
+              if (visionWindow.wasTruncated) {
+                addLog(
+                  "generation",
+                  `[Warning] Blueprint prompt truncated to fit context window. (~${visionWindow.estimatedPromptTokens} prompt tokens)`,
+                  "warning",
                 );
               }
+
+              addLog("generation", "Extracting Vision Blueprint...", "info");
+
+              await reloadLockedModel("3B", "generation");
+
+              const blueprintCompletion = await withTimeout(
+                engineRef.current.chat.completions.create({
+                  messages: [
+                    { role: "system", content: visionSystemPrompt },
+                    { role: "user", content: visionWindow.userPrompt },
+                  ],
+                  temperature: 0.15,
+                  max_tokens: Math.min(768, profile.maxCompletionTokens),
+                }),
+                STRUCTURED_SPEC_TIMEOUT_MS,
+              );
+
+              if (!blueprintCompletion) {
+                throw new Error("Vision blueprint generation timed out.");
+              }
+
+              const rawBlueprint =
+                blueprintCompletion.choices[0].message.content || "";
+              const parsedBlueprint = parseEdgeVisionV1UiSpec(rawBlueprint);
+
+              if (!parsedBlueprint) {
+                throw new Error(
+                  "Vision blueprint was invalid and could not be parsed.",
+                );
+              }
+
+              const uiBlueprint = JSON.stringify(parsedBlueprint, null, 2);
+
+              addLog(
+                "generation",
+                "Vision blueprint extracted successfully.",
+                "success",
+              );
+
+              addLog(
+                "generation",
+                "Releasing 3B vision model before 7B coder handoff...",
+                "info",
+              );
+              await releaseEngineMemory(engineRef.current);
+              addLog(
+                "generation",
+                "3B vision model memory released. Loading 7B coder model...",
+                "info",
+              );
+
+              addLog("generation", "Generating React Architecture...", "info");
+
+              const coderSystemPrompt = buildSystemPrompt(ragContext, "7B");
+              const coderUserMessage = [
+                `Original request:\n${userMessage}`,
+                "",
+                "UI BLUEPRINT:",
+                uiBlueprint,
+                "",
+                "Build the final React component from the blueprint above.",
+                "Output only one runnable React component with export default function App().",
+                "Use only React imports from react.",
+                "Do not add any third-party packages or generic template sections.",
+              ].join("\n");
+
+              const coderWindow = fitPromptToContextWindow(
+                coderSystemPrompt,
+                coderUserMessage,
+                {
+                  contextWindowSize: profile.contextWindowSize,
+                  maxCompletionTokens: profile.maxCompletionTokens,
+                  safetyMarginTokens: WEBLLM_CONTEXT_SAFETY_MARGIN,
+                },
+              );
+
+              if (coderWindow.wasTruncated) {
+                addLog(
+                  "generation",
+                  `[Warning] Coder prompt truncated to fit context window. (~${coderWindow.estimatedPromptTokens} prompt tokens)`,
+                  "warning",
+                );
+              }
+
+              await reloadLockedModel("7B", "generation");
+
+              const completion = await withTimeout(
+                engineRef.current.chat.completions.create({
+                  messages: [
+                    { role: "system", content: coderSystemPrompt },
+                    { role: "user", content: coderWindow.userPrompt },
+                  ],
+                  temperature: profile.temperature,
+                  max_tokens: profile.maxCompletionTokens,
+                }),
+                LLM_COMPLETION_TIMEOUT_MS,
+              );
+
+              if (!completion) {
+                throw new Error(
+                  "Model completion timed out during React generation.",
+                );
+              }
+
+              currentCode = extractCode(
+                completion.choices[0].message.content || "",
+              );
+            } else {
+              const systemPrompt = buildSystemPrompt(ragContext, "7B");
+              const coderWindow = fitPromptToContextWindow(
+                systemPrompt,
+                compactUserMessage,
+                {
+                  contextWindowSize: profile.contextWindowSize,
+                  maxCompletionTokens: profile.maxCompletionTokens,
+                  safetyMarginTokens: WEBLLM_CONTEXT_SAFETY_MARGIN,
+                },
+              );
+
+              if (coderWindow.wasTruncated) {
+                addLog(
+                  "generation",
+                  `[Warning] Prompt truncated to fit context window. (~${coderWindow.estimatedPromptTokens} prompt tokens)`,
+                  "warning",
+                );
+              }
+
+              addLog(
+                "generation",
+                attempt === 1
+                  ? `Generating code for: "${userPrompt}"`
+                  : `Attempt ${attempt}: Self-correcting based on error...`,
+                "info",
+              );
+
+              await reloadLockedModel("7B", "generation");
+
+              const completion = await withTimeout(
+                engineRef.current.chat.completions.create({
+                  messages: [
+                    { role: "system", content: systemPrompt },
+                    { role: "user", content: coderWindow.userPrompt },
+                  ],
+                  temperature: profile.temperature,
+                  max_tokens: profile.maxCompletionTokens,
+                }),
+                LLM_COMPLETION_TIMEOUT_MS,
+              );
+
+              if (!completion) {
+                throw new Error(
+                  "Model completion timed out during code generation.",
+                );
+              }
+
+              currentCode = extractCode(
+                completion.choices[0].message.content || "",
+              );
             }
 
             if (
@@ -773,23 +925,52 @@ export const useAgenticLoop = () => {
               "success",
             );
           } catch (genError: any) {
-            if (genError.message?.includes("timed out")) {
+            const msg = genError?.message || String(genError);
+            // Log the issue but avoid throwing to keep the UI alive.
+            addLog("generation", `Generation error: ${msg}`, "error");
+
+            // Handle timeouts and OOMs gracefully: prefer partial code if present.
+            if (msg.toLowerCase().includes("timed out")) {
               addLog(
                 "generation",
-                "Model timeout reached during generation.",
-                "error",
+                "Model timeout reached during generation. Proceeding with partial output if available.",
+                "warning",
               );
-              throw new Error("Model completion timed out.");
             }
 
-            // Handle WebGPU OOM during generation
-            if (genError.message?.includes("out of memory")) {
-              throw new Error(
-                "WebGPU OOM during generation. The model may be overloaded. " +
-                  "Try refreshing the page to reset GPU memory.",
+            if (
+              msg.toLowerCase().includes("out of memory") ||
+              /webgpu/i.test(msg)
+            ) {
+              addLog(
+                "generation",
+                "WebGPU OOM or device error during generation. Proceeding with partial output if available.",
+                "warning",
               );
             }
-            throw genError;
+
+            // If we captured any partial code, stash it and continue to execution so the user can repair it.
+            if (currentCode && currentCode.trim()) {
+              addLog(
+                "generation",
+                "Using partial generated code due to generation error.",
+                "warning",
+              );
+              setState((prev) => ({ ...prev, generatedCode: currentCode }));
+              // fall through to execution path with partial 'currentCode'
+            } else {
+              // No partial output: return a safe failure result but do not throw.
+              setState((prev) => ({
+                ...prev,
+                isExecuting: false,
+                currentPhase: "error",
+                error: msg,
+              }));
+
+              return { success: false, error: msg } as ExecutionResult & {
+                code?: string;
+              };
+            }
           }
 
           if (
@@ -823,8 +1004,10 @@ export const useAgenticLoop = () => {
 
           // PHASE 2: Autonomous Execution
           setState((prev) => ({ ...prev, currentPhase: "executing" }));
+          const fixedCurrentCode = autoCloseJsx(currentCode);
+
           const result = await executeCodeInWebContainer(
-            currentCode,
+            fixedCurrentCode,
             userPrompt,
             addLog,
             dependenciesInstalledRef,
@@ -845,9 +1028,13 @@ export const useAgenticLoop = () => {
               ...prev,
               isExecuting: false,
               currentPhase: "completed",
-              generatedCode: currentCode,
+              generatedCode: fixedCurrentCode,
             }));
-            return { success: true, code: currentCode, output: result.output };
+            return {
+              success: true,
+              code: fixedCurrentCode,
+              output: result.output,
+            };
           } else {
             // PHASE 4: Self-Healing Loop
             const outputContext = result.output
@@ -927,11 +1114,6 @@ export const useAgenticLoop = () => {
         sanitizeWorkerCode(code),
         userPrompt,
       );
-      assertNoGenericTemplatePayload(
-        preparedCode,
-        "distributed execution payload",
-      );
-
       if (isGeneratingRef.current) {
         const busyMessage = "Please wait for the current task to finish.";
         addLog("execution", busyMessage, "warning");
@@ -980,8 +1162,10 @@ export const useAgenticLoop = () => {
         "info",
       );
 
+      const fixedPreparedCode = autoCloseJsx(preparedCode);
+
       const result = await executeCodeInWebContainer(
-        preparedCode,
+        fixedPreparedCode,
         userPrompt,
         addLog,
         dependenciesInstalledRef,
@@ -998,11 +1182,15 @@ export const useAgenticLoop = () => {
           ...prev,
           isExecuting: false,
           currentPhase: "completed",
-          generatedCode: preparedCode,
+          generatedCode: fixedPreparedCode,
         }));
 
         addLog("execution", "Distributed code execution successful", "success");
-        return { success: true, code: preparedCode, output: result.output };
+        return {
+          success: true,
+          code: fixedPreparedCode,
+          output: result.output,
+        };
       }
 
       const errorMsg = result.error || "Distributed execution failed.";
@@ -1050,6 +1238,7 @@ export const useAgenticLoop = () => {
     executeAgenticLoop,
     executeGeneratedCodeDirectly,
     cancelExecution,
+    resetGeneratedCanvas,
     isReady: state.isInitialized && !state.isLoading,
     engine: engineRef.current,
   };
@@ -1131,68 +1320,15 @@ function isUiIntentPrompt(prompt: string): boolean {
   );
 }
 
-async function generateUiCodeFromStructuredSpec(
-  engine: webllm.MLCEngine,
-  prompt: string,
-  maxCompletionTokens: number,
-): Promise<string | null> {
-  const specSystemPrompt = `You generate only valid JSON for UI specs.
-Return exactly one JSON object and nothing else.
-Schema:
-{
-  "version": "1.0",
-  "title": "string",
-  "subtitle": "string (optional)",
-  "sections": [
-    {
-      "id": "string",
-      "type": "hero|cards|stats|features|timeline|faq",
-      "heading": "string",
-      "body": "string (optional)",
-      "items": ["string"]
-    }
-  ],
-  "cta": { "label": "string" }
-}
-Rules:
-- 2 to 6 sections maximum
-- concise text; no markdown
-- no HTML, no JSX, no shell commands`;
-
-  const completion = await engine.chat.completions.create({
-    messages: [
-      { role: "system", content: specSystemPrompt },
-      {
-        role: "user",
-        content:
-          `Create a UI spec for a faithful implementation of this request. ` +
-          `Mirror any screenshot or mockup instructions, preserve layout hierarchy, ` +
-          `avoid generic templates, and do not echo the request text as visible copy unless the screenshot shows it: ${prompt}`,
-      },
-    ],
-    temperature: 0.2,
-    max_tokens: Math.min(1024, Math.max(384, maxCompletionTokens + 128)),
-  });
-
-  const raw = completion.choices[0].message.content || "";
-  const parsedSpec = parseGeminiLikeUiSpec(raw);
-
-  if (!parsedSpec) {
-    return null;
-  }
-
-  return renderGeminiLikeUiSpec(parsedSpec);
-}
-
 function resolveExecutableUiCodePayload(code: string, prompt: string): string {
   const trimmed = code.trim();
   if (!trimmed) {
     return code;
   }
 
-  const parsedSpec = parseGeminiLikeUiSpec(trimmed);
+  const parsedSpec = parseEdgeVisionV1UiSpec(trimmed);
   if (parsedSpec) {
-    return renderGeminiLikeUiSpec(parsedSpec);
+    return renderEdgeVisionV1UiSpec(parsedSpec);
   }
 
   if (looksLikeShellInstructions(trimmed) && isUiIntentPrompt(prompt)) {
@@ -1208,7 +1344,7 @@ function sanitizeWorkerCode(code: string): string {
   return code.replace(/```(jsx)?/gi, "").trim();
 }
 
-function parseGeminiLikeUiSpec(payload: string): GeminiLikeUiSpec | null {
+function parseEdgeVisionV1UiSpec(payload: string): EdgeVisionV1UiSpec | null {
   const candidate = extractFirstJsonObject(payload);
   if (!candidate) {
     return null;
@@ -1216,10 +1352,10 @@ function parseGeminiLikeUiSpec(payload: string): GeminiLikeUiSpec | null {
 
   try {
     const parsed = JSON.parse(candidate);
-    if (!isGeminiLikeUiSpec(parsed)) {
+    if (!isEdgeVisionV1UiSpec(parsed)) {
       return null;
     }
-    return clampGeminiLikeUiSpec(parsed);
+    return clampEdgeVisionV1UiSpec(parsed);
   } catch {
     return null;
   }
@@ -1277,7 +1413,7 @@ function extractFirstJsonObject(payload: string): string | null {
   return null;
 }
 
-function isGeminiLikeUiSpec(value: unknown): value is GeminiLikeUiSpec {
+function isEdgeVisionV1UiSpec(value: unknown): value is EdgeVisionV1UiSpec {
   if (!value || typeof value !== "object") {
     return false;
   }
@@ -1330,7 +1466,7 @@ function isGeminiLikeUiSpec(value: unknown): value is GeminiLikeUiSpec {
   return true;
 }
 
-function clampGeminiLikeUiSpec(spec: GeminiLikeUiSpec): GeminiLikeUiSpec {
+function clampEdgeVisionV1UiSpec(spec: EdgeVisionV1UiSpec): EdgeVisionV1UiSpec {
   return {
     version: "1.0",
     title: spec.title.trim().slice(0, 80),
@@ -1356,7 +1492,7 @@ function jsxText(value: string): string {
   return JSON.stringify(value);
 }
 
-function renderGeminiLikeUiSpec(spec: GeminiLikeUiSpec): string {
+function renderEdgeVisionV1UiSpec(spec: EdgeVisionV1UiSpec): string {
   const titleExpr = jsxText(spec.title);
   const subtitleExpr = spec.subtitle ? jsxText(spec.subtitle) : null;
   const ctaLabelExpr = spec.cta?.label ? jsxText(spec.cta.label) : null;
@@ -1399,7 +1535,7 @@ function renderGeminiLikeUiSpec(spec: GeminiLikeUiSpec): string {
       <section style={{ maxWidth: 1080, margin: "0 auto", background: "rgba(255,255,255,0.78)", backdropFilter: "blur(8px)", border: "1px solid rgba(148, 163, 184, 0.28)", borderRadius: 18, padding: "1.1rem 1.1rem 1.25rem" }}>
         <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.8rem", flexWrap: "wrap", borderBottom: "1px solid #e2e8f0", paddingBottom: "0.9rem" }}>
           <div>
-            <p style={{ margin: 0, fontSize: 12, letterSpacing: "0.08em", textTransform: "uppercase", color: "#0369a1", fontWeight: 700 }}>Gemini-Style Structured Canvas</p>
+            <p style={{ margin: 0, fontSize: 12, letterSpacing: "0.08em", textTransform: "uppercase", color: "#0369a1", fontWeight: 700 }}>EdgeVision-V1 Structured Canvas</p>
             <h1 style={{ margin: "0.3rem 0 0", fontSize: "2rem", lineHeight: 1.1 }}>{${titleExpr}}</h1>
             ${subtitleExpr ? `<p style={{ margin: "0.45rem 0 0", color: "#475569", maxWidth: 680 }}>{${subtitleExpr}}</p>` : ""}
           </div>
@@ -1415,7 +1551,7 @@ function renderGeminiLikeUiSpec(spec: GeminiLikeUiSpec): string {
 }`;
 }
 
-function sectionToneClass(type: GeminiLikeUiSection["type"]): string {
+function sectionToneClass(type: EdgeVisionV1UiSection["type"]): string {
   switch (type) {
     case "hero":
       return "bg-blue-100 text-blue-700";
@@ -1438,273 +1574,10 @@ function compactPromptForLowEnd(prompt: string): string {
   return prompt.replace(/\s{3,}/g, " ").trim();
 }
 
-export function generateLiteCodeFromPrompt(prompt: string): string {
-  const imageRequirements = extractImageAnalysisRequirements(prompt);
-
-  if (imageRequirements) {
-    return renderDeterministicLiteMimicFromImageDescription(imageRequirements);
-  }
-
-  return buildPromptAwareUiFallback(prompt, "lite");
-}
-
-function extractImageAnalysisRequirements(prompt: string): string | null {
-  const marker = "[IMAGE ANALYSIS REQUIREMENTS]";
-  const start = prompt.indexOf(marker);
-
-  if (start < 0) {
-    return null;
-  }
-
-  const block = prompt.slice(start + marker.length).trim();
-  if (!block) {
-    return null;
-  }
-
-  const bounded = block.slice(0, 2400).trim();
-  return bounded.length > 0 ? bounded : null;
-}
-
-interface LiteLayoutTokens {
-  layout: "sidebar-content" | "topbar-content" | "single-column";
-  contentStyle: "dashboard" | "form" | "catalog" | "marketing" | "mixed";
-  density: "compact" | "comfortable";
-  emphasis: "data" | "action" | "narrative";
-  sections: string[];
-}
-
-const DEFAULT_LITE_LAYOUT_TOKENS: LiteLayoutTokens = {
-  layout: "single-column",
-  contentStyle: "mixed",
-  density: "comfortable",
-  emphasis: "narrative",
-  sections: ["header", "content-grid"],
-};
-
-function parseLiteLayoutTokens(description: string): LiteLayoutTokens {
-  const marker = "[LAYOUT TOKENS]";
-  const start = description.indexOf(marker);
-
-  if (start < 0) {
-    return DEFAULT_LITE_LAYOUT_TOKENS;
-  }
-
-  const afterMarker = description.slice(start + marker.length);
-  const referenceMarkerIndex = afterMarker.indexOf("[REFERENCE DESCRIPTION]");
-  const tokenText =
-    referenceMarkerIndex >= 0
-      ? afterMarker.slice(0, referenceMarkerIndex)
-      : afterMarker;
-
-  const lines = tokenText
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  const map = new Map<string, string>();
-  for (const line of lines) {
-    const idx = line.indexOf("=");
-    if (idx > 0) {
-      map.set(line.slice(0, idx).trim(), line.slice(idx + 1).trim());
-    }
-  }
-
-  const layout = map.get("layout");
-  const contentStyle = map.get("contentStyle");
-  const density = map.get("density");
-  const emphasis = map.get("emphasis");
-  const sections = (map.get("sections") || "")
-    .split(",")
-    .map((section) => section.trim())
-    .filter(Boolean);
-
-  return {
-    layout:
-      layout === "sidebar-content" ||
-      layout === "topbar-content" ||
-      layout === "single-column"
-        ? layout
-        : DEFAULT_LITE_LAYOUT_TOKENS.layout,
-    contentStyle:
-      contentStyle === "dashboard" ||
-      contentStyle === "form" ||
-      contentStyle === "catalog" ||
-      contentStyle === "marketing" ||
-      contentStyle === "mixed"
-        ? contentStyle
-        : DEFAULT_LITE_LAYOUT_TOKENS.contentStyle,
-    density:
-      density === "compact" || density === "comfortable"
-        ? density
-        : DEFAULT_LITE_LAYOUT_TOKENS.density,
-    emphasis:
-      emphasis === "data" || emphasis === "action" || emphasis === "narrative"
-        ? emphasis
-        : DEFAULT_LITE_LAYOUT_TOKENS.emphasis,
-    sections:
-      sections.length > 0 ? sections : DEFAULT_LITE_LAYOUT_TOKENS.sections,
-  };
-}
-
-function extractReferenceDescription(description: string): string {
-  const marker = "[REFERENCE DESCRIPTION]";
-  const start = description.indexOf(marker);
-
-  if (start < 0) {
-    return description;
-  }
-
-  const text = description.slice(start + marker.length).trim();
-  return text.length > 0 ? text : description;
-}
-
-function extractMeaningfulReferenceLines(referenceText: string): string[] {
-  return referenceText
-    .split(/\r?\n|[.;]+/)
-    .map((line) => line.replace(/\s+/g, " ").trim())
-    .filter((line) => line.length >= 8)
-    .slice(0, 14);
-}
-
-function toHeadlineCase(value: string): string {
-  return value
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 6)
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-    .join(" ");
-}
-
-function deriveLiteMimicTitle(
-  lines: string[],
-  tokens: LiteLayoutTokens,
-): string {
-  const firstLine = lines[0] ?? "";
-  const candidate = firstLine
-    .replace(/^(create|build|design|generate)\s+/i, "")
-    .trim();
-
-  if (candidate.length >= 10) {
-    return toHeadlineCase(candidate);
-  }
-
-  if (tokens.contentStyle === "dashboard") {
-    return "Operations Dashboard";
-  }
-
-  if (tokens.contentStyle === "form") {
-    return "Account Workflow";
-  }
-
-  if (tokens.contentStyle === "catalog") {
-    return "Content Catalog";
-  }
-
-  if (tokens.contentStyle === "marketing") {
-    return "Landing Experience";
-  }
-
-  return "Reference-Matched UI";
-}
-
-function chunkArray<T>(items: T[], size: number): T[][] {
-  const chunks: T[][] = [];
-  for (let index = 0; index < items.length; index += size) {
-    chunks.push(items.slice(index, index + size));
-  }
-  return chunks;
-}
-
-function renderDeterministicLiteMimicFromImageDescription(
-  description: string,
-): string {
-  const tokens = parseLiteLayoutTokens(description);
-  const referenceText = extractReferenceDescription(description);
-  const lines = extractMeaningfulReferenceLines(referenceText);
-  const title = deriveLiteMimicTitle(lines, tokens);
-  const subtitle =
-    lines[1] ??
-    "Deterministic low-latency render synthesized from visual layout signals.";
-
-  const navItems = lines.slice(2, 7).map((line, idx) => {
-    return toHeadlineCase(line) || `Section ${idx + 1}`;
-  });
-
-  const cardSource =
-    lines.length > 0
-      ? lines
-      : [
-          "Primary content block aligned with the source image hierarchy",
-          "Secondary support block preserving spacing and visual rhythm",
-          "Control cluster placed near the dominant interaction area",
-          "Summary/details region matching card density from the screenshot",
-        ];
-
-  const groupedCards = chunkArray(cardSource.slice(0, 9), 3).slice(0, 3);
-
-  const layoutClass = tokens.layout;
-  const compact = tokens.density === "compact";
-  const mainGap = compact ? "0.7rem" : "1rem";
-  const cardPadding = compact ? "0.8rem" : "1rem";
-
-  return `export default function App() {
-  const navItems = ${JSON.stringify(navItems.length > 0 ? navItems : ["Overview", "Workspace", "Details"])};
-  const groupedCards = ${JSON.stringify(groupedCards.length > 0 ? groupedCards : [["Primary content area"], ["Secondary content area"]])};
-
-  return (
-    <main style={{ minHeight: "100vh", margin: 0, background: "#eef0f4", padding: "1.25rem", fontFamily: "Inter, system-ui, sans-serif", color: "#0f172a" }}>
-      <section style={{ maxWidth: 1120, margin: "0 auto", borderRadius: 20, border: "1px solid #d4d8df", background: "#f8fafc", overflow: "hidden", boxShadow: "0 16px 48px rgba(15, 23, 42, 0.08)" }}>
-        <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "1rem", padding: "1rem 1.2rem", borderBottom: "1px solid #dbe1ea", background: "#f6f8fb", flexWrap: "wrap" }}>
-          <div>
-            <p style={{ margin: 0, fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "#64748b", fontWeight: 700 }}>Visual Fidelity Mode</p>
-            <h1 style={{ margin: "0.35rem 0 0", fontSize: "clamp(1.7rem, 4.5vw, 2.9rem)", lineHeight: 1.05, letterSpacing: "-0.02em" }}>{${JSON.stringify(title)}}</h1>
-            <p style={{ margin: "0.55rem 0 0", color: "#475569", maxWidth: 760, lineHeight: 1.5 }}>{${JSON.stringify(subtitle)}}</p>
-          </div>
-          <button style={{ border: "none", borderRadius: 999, background: "#0f172a", color: "#fff", padding: "0.58rem 0.95rem", fontSize: 12, fontWeight: 700 }}>Action</button>
-        </header>
-
-        <div style={{ display: "grid", gridTemplateColumns: ${JSON.stringify(layoutClass === "sidebar-content" ? "220px 1fr" : "1fr")}, gap: ${JSON.stringify(mainGap)}, padding: "1rem" }}>
-          ${
-            layoutClass === "sidebar-content"
-              ? `<aside style={{ borderRadius: 14, border: "1px solid #dbe1ea", background: "#ffffff", padding: "0.75rem" }}>
-            <p style={{ margin: "0 0 0.5rem", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "#64748b", fontWeight: 700 }}>Navigation</p>
-            <div style={{ display: "grid", gap: "0.45rem" }}>
-              {navItems.map((item) => (
-                <div key={item} style={{ borderRadius: 10, border: "1px solid #e2e8f0", background: "#f8fafc", padding: "0.55rem 0.65rem", fontSize: 13, color: "#1e293b", fontWeight: 600 }}>{item}</div>
-              ))}
-            </div>
-          </aside>`
-              : ""
-          }
-
-          <div style={{ display: "grid", gap: ${JSON.stringify(mainGap)} }}>
-            ${
-              layoutClass === "topbar-content"
-                ? `<div style={{ borderRadius: 12, border: "1px solid #dbe1ea", background: "#ffffff", padding: "0.65rem 0.75rem", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.6rem", flexWrap: "wrap" }}>
-              <div style={{ display: "flex", gap: "0.45rem", flexWrap: "wrap" }}>
-                {navItems.slice(0, 4).map((item) => (
-                  <span key={item} style={{ borderRadius: 999, border: "1px solid #e2e8f0", background: "#f8fafc", padding: "0.28rem 0.6rem", fontSize: 12, color: "#334155", fontWeight: 600 }}>{item}</span>
-                ))}
-              </div>
-              <span style={{ fontSize: 12, color: "#64748b", fontWeight: 600 }}>Status: synced</span>
-            </div>`
-                : ""
-            }
-
-            <div style={{ display: "grid", gap: ${JSON.stringify(mainGap)}, gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))" }}>
-              {groupedCards.flat().map((line, idx) => (
-                <article key={idx + "-" + line} style={{ borderRadius: 14, border: "1px solid #dbe1ea", background: "#ffffff", padding: ${JSON.stringify(cardPadding)}, boxShadow: "0 8px 24px rgba(15, 23, 42, 0.04)" }}>
-                  <h3 style={{ margin: "0 0 0.45rem", fontSize: "1.05rem", color: "#0f172a" }}>{"Panel " + (idx + 1)}</h3>
-                  <p style={{ margin: 0, color: "#334155", lineHeight: 1.5 }}>{line}</p>
-                </article>
-              ))}
-            </div>
-          </div>
-        </div>
-      </section>
-    </main>
+export function generateLiteCodeFromPrompt(_prompt: string): string {
+  throw new Error(
+    "Deterministic fallback rendering has been removed. WebGPU generation must succeed or fail loudly.",
   );
-}`;
 }
 
 /**
@@ -1726,6 +1599,7 @@ Guidelines:
 - If the request references a screenshot, mockup, image, or other visual reference, treat that reference as the source of truth and mirror the visible layout, hierarchy, spacing, text density, button placement, and card structure as closely as possible
 - Preserve the prompt's design language; do not replace a specific UI with a generic dashboard, landing page, or starter template
 - Prefer exact composition over invention when the prompt is image-led
+- When building from an image, use a contemporary polished UI style with clean sans-serif typography, refined spacing, rounded cards, and subtle shadows. Avoid dated HTML styling, default browser controls, or 1990s aesthetics.
 - Do not render the user's request text as visible UI copy unless the referenced screenshot explicitly shows that same text
 - If the request is backend-focused, return runnable Node.js code
 - Do not output any prose before or after code
@@ -1733,9 +1607,12 @@ Guidelines:
 - Never output pseudo tags like <cards> or <main-content>; use valid JSX elements only
 - Use className, never class, in JSX`;
 
-  // Prompt tuning for smaller models
-  if (modelType === "0.5B") {
-    prompt += `\n\nIMPORTANT: Output code only. Do not include explanations, markdown, or code fences. For UI requests, output one React component with a default export. For screenshot-driven requests, keep the structure faithful to the source image even if the result is visually dense. For backend requests, prefer Node.js core modules.`;
+  if (modelType === "3B") {
+    prompt += `\n\nIMPORTANT: This is the blueprint stage. Return structured output only, preserve the visual hierarchy, and do not invent generic sections.`;
+  }
+
+  if (modelType === "7B") {
+    prompt += `\n\nIMPORTANT: This is the coder stage. Output one runnable React component only, with faithful image alignment, editable text, and a modern single-file React layout. Ban primitive unstyled div layouts. Use inline Tailwind CSS with a contemporary polished design: clean sans-serif typography, refined spacing, a rounded shadowed card, subtle gradients, and absolute positioning inside the card. CRITICAL: Do NOT use HTML5 drag-and-drop. You MUST make the main container a free-floating draggable element. Use standard React state const [pos, setPos] = useState({x: 0, y: 0}). Attach onPointerDown, onPointerMove, and onPointerUp to the wrapper div to track mouse movement, and apply style={{ position: 'absolute', left: pos.x, top: pos.y }}. CRITICAL HARDWARE LIMIT: You are running on edge hardware with limited VRAM. You MUST keep your code extremely concise. Do NOT add unnecessary wrapper divs. Do NOT write comments. Output ONLY the raw, perfectly formatted JSX code. Do not hallucinate massive arrays. Ensure perfect syntax. Do not drop letters in standard attributes (use className, default, button). Close all tags perfectly. Avoid dated HTML styling, default browser controls, and 1990s aesthetics.`;
   }
 
   if (ragContext && ragContext.length > 0) {
@@ -1976,227 +1853,8 @@ function looksLikePlainTextDescription(text: string): boolean {
   return cleaned.split(/\s+/).length > 16;
 }
 
-type FallbackCard = {
-  title: string;
-  body: string;
-  accent: string;
-  accentLabel: string;
-};
-
-function buildPromptAwareUiFallback(
-  prompt: string,
-  mode: "lite" | "emergency",
-): string {
-  const normalizedPrompt = prompt.replace(/\s+/g, " ").trim();
-  const lowerPrompt = normalizedPrompt.toLowerCase();
-  const title = deriveFallbackTitle(
-    normalizedPrompt,
-    isImageLedPrompt(normalizedPrompt),
-  );
-  const isImageLed = /image|screenshot|mockup|reference|picture|visual/i.test(
-    normalizedPrompt,
-  );
-  const cards = buildFallbackCards(lowerPrompt, isImageLed);
-  const panelLabel = isImageLed
-    ? "Visual fidelity target"
-    : "Prompt-aligned layout";
-  const background = isImageLed
-    ? "#f3f4f6"
-    : mode === "lite"
-      ? "#f8fafc"
-      : "#f4f4f5";
-  const surface = "#ffffff";
-  const border = isImageLed ? "#d4d4d8" : "#e4e4e7";
-  const accent = isImageLed
-    ? "#111827"
-    : lowerPrompt.includes("dashboard")
-      ? "#0f766e"
-      : "#111111";
-  const subtitle = isImageLed
-    ? "Fast reference-based preview while full generation completes."
-    : mode === "lite"
-      ? "Fast local synthesis for low-end hardware."
-      : "Fallback render to keep preview stable.";
-  const borderStyle = `1px solid ${border}`;
-
-  return `export default function App() {
-  const cards = ${JSON.stringify(cards)};
-
-  return (
-    <main style={{ minHeight: "100vh", margin: 0, padding: "1.5rem", background: ${JSON.stringify(background)}, fontFamily: "Inter, system-ui, sans-serif", color: "#0f172a" }}>
-      <section style={{ maxWidth: 1120, margin: "0 auto", background: ${JSON.stringify(surface)}, borderRadius: 24, border: ${JSON.stringify(borderStyle)}, overflow: "hidden", boxShadow: "0 24px 80px rgba(15, 23, 42, 0.08)" }}>
-        <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "1rem", padding: "1.05rem 1.35rem", borderBottom: ${JSON.stringify(borderStyle)}, flexWrap: "wrap" }}>
-          <div style={{ minWidth: 0 }}>
-            <p style={{ margin: 0, fontSize: 12, letterSpacing: "0.08em", textTransform: "uppercase", color: "#64748b", fontWeight: 700 }}>{${JSON.stringify(panelLabel)}}</p>
-            <h1 style={{ margin: "0.35rem 0 0", fontSize: "clamp(2rem, 5vw, 3.35rem)", lineHeight: 1.04, color: "#0f172a", letterSpacing: "-0.03em" }}>{${JSON.stringify(title)}}</h1>
-            <p style={{ margin: "0.7rem 0 0", maxWidth: 760, color: "#475569", lineHeight: 1.55 }}>{${JSON.stringify(subtitle)}}</p>
-          </div>
-          <button style={{ border: "none", borderRadius: 999, background: ${JSON.stringify(accent)}, color: "#fff", padding: "0.65rem 1rem", fontSize: 13, fontWeight: 700, boxShadow: "0 10px 28px rgba(15, 23, 42, 0.16)" }}>
-            ${mode === "lite" ? "Preview" : "Action"}
-          </button>
-        </header>
-
-        <div style={{ padding: "1.25rem", display: "grid", gap: "1rem" }}>
-          <div style={{ display: "grid", gap: "0.85rem", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))" }}>
-            {cards.map((card) => (
-              <article key={card.title} style={{ borderRadius: 18, border: ${JSON.stringify(borderStyle)}, padding: "1rem", background: "#ffffff", boxShadow: "0 10px 30px rgba(15, 23, 42, 0.04)" }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem" }}>
-                  <h2 style={{ margin: 0, fontSize: "1.05rem", color: "#0f172a" }}>{card.title}</h2>
-                  <span style={{ display: "inline-flex", borderRadius: 999, padding: "0.2rem 0.55rem", background: card.accent, color: "#fff", fontSize: 11, fontWeight: 700 }}>{card.accentLabel}</span>
-                </div>
-                <p style={{ margin: "0.65rem 0 0", color: "#475569", lineHeight: 1.55 }}>{card.body}</p>
-              </article>
-            ))}
-          </div>
-        </div>
-      </section>
-    </main>
-  );
-}`;
-}
-
 function isImageLedPrompt(prompt: string): boolean {
   return /image|screenshot|mockup|reference|picture|visual/i.test(prompt);
-}
-
-function deriveFallbackTitle(prompt: string, isImageLed: boolean): string {
-  if (isImageLed) {
-    return "Generated UI";
-  }
-
-  if (/dashboard|analytics|stats|metrics/.test(prompt)) {
-    return "Dashboard Surface";
-  }
-
-  if (/form|input|signup|login|checkout|contact/.test(prompt)) {
-    return "Form Layout";
-  }
-
-  if (/table|grid|list|catalog|gallery/.test(prompt)) {
-    return "Content Grid";
-  }
-
-  if (/hero|landing|marketing|home/.test(prompt)) {
-    return "Landing Surface";
-  }
-
-  return "Generated UI";
-}
-
-function buildFallbackCards(
-  prompt: string,
-  isImageLed: boolean,
-): FallbackCard[] {
-  const baseCards: FallbackCard[] = [];
-
-  if (/dashboard|analytics|stats|metrics/.test(prompt)) {
-    baseCards.push(
-      {
-        title: "Overview",
-        body: "Surface the primary numbers, status indicators, and the layout rhythm the prompt expects.",
-        accent: "#0f766e",
-        accentLabel: "Metrics",
-      },
-      {
-        title: "Detail Panel",
-        body: "Keep the secondary panel, supporting chart, or side content aligned with the reference structure.",
-        accent: "#1d4ed8",
-        accentLabel: "Panel",
-      },
-      {
-        title: "Recent Activity",
-        body: "Show the most visible list, activity stream, or table area with the same density as the source.",
-        accent: "#7c3aed",
-        accentLabel: "Feed",
-      },
-    );
-  } else if (/form|input|signup|login|checkout|contact/.test(prompt)) {
-    baseCards.push(
-      {
-        title: "Primary Form",
-        body: "Place the main inputs where the prompt or image implies the user should begin.",
-        accent: "#0f766e",
-        accentLabel: "Form",
-      },
-      {
-        title: "Supporting Copy",
-        body: "Keep helper text, instructions, and microcopy in the same visual rhythm as the reference.",
-        accent: "#1d4ed8",
-        accentLabel: "Copy",
-      },
-      {
-        title: "Action Area",
-        body: "Keep the primary button hierarchy, spacing, and emphasis consistent with the source UI.",
-        accent: "#7c3aed",
-        accentLabel: "Action",
-      },
-    );
-  } else if (/table|grid|list|catalog|gallery/.test(prompt)) {
-    baseCards.push(
-      {
-        title: "Primary Grid",
-        body: "Render the visible collection or table density from the prompt instead of flattening it into a generic card set.",
-        accent: "#0f766e",
-        accentLabel: "Grid",
-      },
-      {
-        title: "Filters",
-        body: "Preserve the top controls, filter chips, and utility actions that frame the content area.",
-        accent: "#1d4ed8",
-        accentLabel: "Filter",
-      },
-      {
-        title: "Supporting Details",
-        body: "Keep metadata, labels, and auxiliary content aligned with the original structure.",
-        accent: "#7c3aed",
-        accentLabel: "Meta",
-      },
-    );
-  } else if (isImageLed) {
-    baseCards.push(
-      {
-        title: "Visual Match",
-        body: "Mirror the screenshot's composition, spacing, and hierarchy before adding any embellishment.",
-        accent: "#0f766e",
-        accentLabel: "Exact",
-      },
-      {
-        title: "Controls",
-        body: "Keep buttons, fields, labels, and chrome in the same relative positions as the reference UI.",
-        accent: "#1d4ed8",
-        accentLabel: "UI",
-      },
-      {
-        title: "Polish",
-        body: "Refine the surface while retaining the original layout language and visual weight.",
-        accent: "#7c3aed",
-        accentLabel: "Refine",
-      },
-    );
-  } else {
-    baseCards.push(
-      {
-        title: "Primary Surface",
-        body: "Build the largest visible content block first so the output reflects the request rather than a starter template.",
-        accent: "#0f766e",
-        accentLabel: "Main",
-      },
-      {
-        title: "Supporting Area",
-        body: "Keep the secondary content, notes, or supporting controls aligned with the requested composition.",
-        accent: "#1d4ed8",
-        accentLabel: "Support",
-      },
-      {
-        title: "Interactions",
-        body: "Place the visible actions and status elements where a user would expect them from the prompt.",
-        accent: "#7c3aed",
-        accentLabel: "Action",
-      },
-    );
-  }
-
-  return baseCards;
 }
 
 function sanitizeGeneratedUiCode(code: string): string {
@@ -2330,19 +1988,6 @@ function isLikelyValidGeneratedCode(code: string, prompt: string): boolean {
   return /module\.exports|export\s+default|function\s+\w+|const\s+\w+\s*=/.test(
     trimmed,
   );
-}
-
-function assertNoGenericTemplatePayload(code: string, context: string): void {
-  const normalized = sanitizeGeneratedUiCode(code).toLowerCase();
-  const matchedMarkers = GENERIC_TEMPLATE_MARKERS.filter((marker) =>
-    normalized.includes(marker),
-  );
-
-  if (matchedMarkers.length >= 2) {
-    throw new Error(
-      `Blocked generic template payload in ${context}. Matched markers: ${matchedMarkers.join(", ")}`,
-    );
-  }
 }
 
 async function ensureReactWorkspace(
@@ -2594,8 +2239,6 @@ async function executeCodeInWebContainer(
     .replace(/```(jsx|js|tsx|ts)?/gi, "")
     .replace(/```/g, "")
     .trim();
-
-  assertNoGenericTemplatePayload(safeCode, "WebContainer /src/App.jsx write");
 
   await webContainerService.writeFile("/src/App.jsx", safeCode);
   addLog("execution", "Updated /src/App.jsx in WebContainer", "success");

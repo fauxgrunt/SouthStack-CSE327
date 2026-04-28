@@ -1,5 +1,6 @@
 // cSpell:words peerjs webllm
 import * as webllm from "@mlc-ai/web-llm";
+import { MODEL_CONFIGS } from "../hooks/useAgenticLoop";
 import type { DataConnection } from "peerjs";
 import type { SwarmTaskPayload } from "../hooks/useSwarm";
 
@@ -21,6 +22,89 @@ Analyze the provided code chunk and output concise findings with:
 4) ACTIONS: prioritized fixes with short rationale
 
 Respond in plain text with clear headings.`;
+
+const STRICT_MODEL_LOAD_ERRORS = {
+  blueprint: "INSUFFICIENT VRAM: Cannot load 3B Vision Blueprint Model",
+  coder: "INSUFFICIENT VRAM: Cannot load 7B Coder Model",
+} as const;
+const BLUEPRINT_STAGE_TIMEOUT_MS = 300000;
+const CODER_STAGE_TIMEOUT_MS = 300000;
+
+function isAllocationFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /vram|memory|allocation|out of memory|webgpu/i.test(message);
+}
+
+function normalizeWorkerModelError(
+  error: unknown,
+  fallbackMessage: string,
+  strictMessage: string,
+): string {
+  if (isAllocationFailure(error)) {
+    return strictMessage;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  return `${fallbackMessage}: ${message}`;
+}
+
+function isWorkerPreloadFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /fetch\.worker\.js|preload|pre-loading|pre loading|failed to fetch|worker bootstrap/i.test(
+    message,
+  );
+}
+
+async function createCompletionWithWorkerGuard<T>(
+  promiseFactory: () => Promise<T>,
+  label: string,
+  timeoutMs = 25000,
+): Promise<T | null> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+  try {
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => {
+        reject(
+          new Error(`${label} timed out while waiting for worker startup.`),
+        );
+      }, timeoutMs);
+    });
+
+    return (await Promise.race([promiseFactory(), timeoutPromise])) as T;
+  } catch (error) {
+    if (isWorkerPreloadFailure(error)) {
+      console.warn(
+        `[WorkerGuard] ${label} preload failure; continuing without blocking.`,
+        error,
+      );
+      return null;
+    }
+
+    throw error;
+  } finally {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
+async function releaseEngineMemory(engine: webllm.MLCEngine): Promise<void> {
+  const cleanupEngine = engine as webllm.MLCEngine & {
+    unload?: () => Promise<void> | void;
+    destroy?: () => Promise<void> | void;
+  };
+
+  if (typeof cleanupEngine.unload === "function") {
+    await cleanupEngine.unload();
+  } else if (typeof cleanupEngine.destroy === "function") {
+    await cleanupEngine.destroy();
+  }
+
+  await new Promise<void>((resolve) => {
+    window.setTimeout(() => resolve(), 1000);
+  });
+}
 
 function isAsyncIterable(value: unknown): value is AsyncIterable<string> {
   return (
@@ -104,7 +188,7 @@ export function extractAndParseJSON(llmOutput: string): TaskAssignment[] {
     firstBracket >= lastBracket
   ) {
     console.error("[JSONExtractor] No valid JSON array brackets found");
-    return createFallbackTasks(llmOutput);
+    throw new Error("Task decomposition did not produce a valid JSON array.");
   }
 
   jsonString = jsonString.substring(firstBracket, lastBracket + 1);
@@ -120,12 +204,12 @@ export function extractAndParseJSON(llmOutput: string): TaskAssignment[] {
     // Validate structure
     if (!Array.isArray(parsed)) {
       console.error("[JSONExtractor] Parsed result is not an array");
-      return createFallbackTasks(llmOutput);
+      throw new Error("Task decomposition payload is not an array.");
     }
 
     if (parsed.length === 0) {
       console.error("[JSONExtractor] Parsed array is empty");
-      return createFallbackTasks(llmOutput);
+      throw new Error("Task decomposition returned zero tasks.");
     }
 
     // Validate each task has required fields
@@ -139,7 +223,7 @@ export function extractAndParseJSON(llmOutput: string): TaskAssignment[] {
 
     if (validTasks.length === 0) {
       console.error("[JSONExtractor] No valid tasks found after filtering");
-      return createFallbackTasks(llmOutput);
+      throw new Error("Task decomposition returned invalid task entries.");
     }
 
     console.log(
@@ -175,25 +259,8 @@ export function extractAndParseJSON(llmOutput: string): TaskAssignment[] {
       console.error("[JSONExtractor] Retry parse also failed:", retryError);
     }
 
-    // Step 5: Return safe fallback
-    return createFallbackTasks(llmOutput);
+    throw new Error("Task decomposition JSON parse failed after retry.");
   }
-}
-
-/**
- * Create fallback tasks when JSON extraction fails
- * Returns a safe default task array so the app doesn't crash
- */
-function createFallbackTasks(llmOutput: string): TaskAssignment[] {
-  console.warn("[JSONExtractor] Using fallback task generation");
-
-  // Create a single task that includes the full prompt
-  return [
-    {
-      fileName: "generated/main.ts",
-      instructions: `The AI returned an invalid response. Original output: ${llmOutput.substring(0, 500)}... Please implement the requested functionality in this file.`,
-    },
-  ];
 }
 
 /**
@@ -235,10 +302,55 @@ REQUIREMENTS:
 /**
  * System Prompt for Worker Nodes
  *
- * This prompt instructs worker nodes to execute code generation tasks.
+ * This prompt instructs worker nodes to execute the final React coding stage.
  */
-export const WORKER_PROMPT =
-  "You are an expert React and Tailwind developer. You will receive a UI description. Output ONLY a single, valid React component that matches the description exactly. Use valid JSX syntax, inline Tailwind CSS classes, and a default export suitable for App.jsx. Do NOT output markdown, explanations, placeholders, or non-React code. Return only raw runnable code.";
+export const WORKER_PROMPT = `You are the 7B React coder stage in a strict two-stage offline pipeline.
+Your task is to generate a fully functional, interactive React UI from the provided blueprint.
+
+CRITICAL SYSTEM CONSTRAINTS:
+1. ZERO EXTERNAL LIBRARIES: You are forbidden from importing react-draggable, tailwind-ui, lucide-react, or ANY other third-party NPM package.
+2. ALLOWED IMPORTS: You may ONLY import from 'react' (for example, import React, { useState } from 'react';).
+3. STYLING: You MUST use standard Tailwind CSS utility classes directly in the className attribute. Do not use wrapper functions.
+
+INTERACTIVITY REQUIREMENTS (MUST IMPLEMENT):
+4. FREE-FLOATING DRAG: You must make the main UI container movable with React state and pointer events.
+  - Use const [pos, setPos] = useState({ x: 0, y: 0 }).
+  - Attach onPointerDown, onPointerMove, and onPointerUp to the wrapper.
+  - Apply style={{ position: 'absolute', left: pos.x, top: pos.y }} to the draggable shell.
+5. INLINE EDITING: Every text node (h1, h2, p, span, button labels) MUST include the attributes contentEditable={true} and suppressContentEditableWarning={true} so the user can type directly into the preview.
+
+DRAG HANDLE REQUIREMENT:
+You must wrap the entire generated component in a draggable container using standard React state (x, y) and pointer events so the user can drag the UI around the Canvas.
+
+PERFORMANCE REQUIREMENT:
+Keep the implementation compact and avoid unnecessary abstraction so the 7B stage can finish faster.
+
+PIPELINE EXECUTION:
+Use the uiBlueprint as the source of truth. Recreate the layout faithfully and preserve the original composition, spacing, alignment, color mood, and typography as closely as possible.
+Prefer a compact single-screen implementation when the source is a centered form or login page. Use a contemporary polished visual style: clean sans-serif typography, soft shadows, rounded corners, refined spacing, and subtle gradients when appropriate. Avoid dated HTML styling, Times New Roman/serif defaults, or 1990s-looking layouts. Output ONLY the raw, complete, functional React code containing export default function App(). Do not include explanations or markdown outside the code block.`;
+
+const VISION_BLUEPRINT_PROMPT = `You are the 3B vision blueprint stage in the SouthStack worker pipeline.
+Return exactly one JSON object and nothing else.
+Schema:
+{
+  "version": "1.0",
+  "title": "string",
+  "subtitle": "string (optional)",
+  "sections": [
+    {
+      "id": "string",
+      "type": "hero|cards|stats|features|timeline|faq",
+      "heading": "string",
+      "body": "string (optional)",
+      "items": ["string"]
+    }
+  ],
+  "cta": { "label": "string" }
+}
+Rules:
+- Preserve the visible hierarchy, copy, spacing, and interaction cues from the prompt
+- Do not generate JSX, markdown, or shell commands
+- Do not invent generic dashboard sections or placeholder text`;
 
 /**
  * Build worker prompt with shared context
@@ -262,6 +374,92 @@ Ensure your code integrates properly with the above context.`;
 export interface TaskAssignment {
   fileName: string;
   instructions: string;
+}
+
+function extractFirstJsonObject(payload: string): string | null {
+  const cleaned = payload
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
+
+  const start = cleaned.indexOf("{");
+  if (start === -1) {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let isEscaped = false;
+
+  for (let index = start; index < cleaned.length; index += 1) {
+    const ch = cleaned[index];
+
+    if (inString) {
+      if (isEscaped) {
+        isEscaped = false;
+        continue;
+      }
+
+      if (ch === "\\") {
+        isEscaped = true;
+        continue;
+      }
+
+      if (ch === '"') {
+        inString = false;
+      }
+
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (ch === "{") {
+      depth += 1;
+    } else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return cleaned.slice(start, index + 1);
+      }
+    }
+  }
+
+  return null;
+}
+
+function parseVisionBlueprint(payload: string): string | null {
+  const candidate = extractFirstJsonObject(payload);
+  if (!candidate) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(candidate) as {
+      version?: unknown;
+      title?: unknown;
+      sections?: unknown;
+    };
+
+    if (parsed.version !== "1.0") {
+      return null;
+    }
+
+    if (typeof parsed.title !== "string" || !parsed.title.trim()) {
+      return null;
+    }
+
+    if (!Array.isArray(parsed.sections) || parsed.sections.length === 0) {
+      return null;
+    }
+
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return null;
+  }
 }
 
 export async function createDebugAnalysisPayloads(
@@ -344,11 +542,19 @@ export async function orchestrateSwarm(
   let response: string;
   try {
     console.log("[Orchestrator] Requesting task decomposition from AI...");
-    const completion = await engine.chat.completions.create({
-      messages,
-      temperature: 0.7,
-      max_tokens: 1000, // Reduced from 2000 for faster decomposition
-    });
+    const completion = await createCompletionWithWorkerGuard(
+      () =>
+        engine.chat.completions.create({
+          messages,
+          temperature: 0.7,
+          max_tokens: 1000, // Reduced from 2000 for faster decomposition
+        }),
+      `Task decomposition for ${userPrompt.slice(0, 32)}`,
+    );
+
+    if (!completion) {
+      throw new Error("Failed to decompose task with AI");
+    }
 
     response = completion.choices[0]?.message?.content || "";
     console.log(
@@ -367,10 +573,9 @@ export async function orchestrateSwarm(
 
   // Step 3: Distribute tasks to worker nodes (round-robin)
   if (activeConnections.length === 0) {
-    console.warn(
-      "[Orchestrator] No active connections - cannot distribute tasks",
+    throw new Error(
+      "No active worker connections available for swarm execution.",
     );
-    return [];
   }
 
   const assignments: {
@@ -457,11 +662,19 @@ export async function executeWorkerTask(
     );
     const startTime = Date.now();
 
-    const completion = await engine.chat.completions.create({
-      messages,
-      temperature: 0.3, // Lower temperature for more consistent code generation
-      max_tokens: 800, // Reduced from 4000 for faster generation (~10-15 seconds)
-    });
+    const completion = await createCompletionWithWorkerGuard(
+      () =>
+        engine.chat.completions.create({
+          messages,
+          temperature: 0.2, // Lower temperature for faster, more stable generation
+          max_tokens: 720, // Keep the output compact for quicker streaming
+        }),
+      `Worker task ${taskPayload.taskId}`,
+    );
+
+    if (!completion) {
+      return "";
+    }
 
     const generatedCode = completion.choices[0]?.message?.content || "";
     const elapsed = Date.now() - startTime;
@@ -478,11 +691,22 @@ export async function executeWorkerTask(
 
     return cleanCode;
   } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
     console.error(
       `[Worker] Failed to execute task ${taskPayload.taskId}:`,
       error,
     );
-    throw error;
+
+    if (isAllocationFailure(error)) {
+      console.error(
+        `[Worker] Allocation failure during task ${taskPayload.taskId}: ${msg}`,
+      );
+      // Return empty result so caller can handle it without crashing the worker.
+      return "";
+    }
+
+    // For other errors, try to return partial output if available (none here), otherwise empty string.
+    return "";
   }
 }
 
@@ -529,12 +753,104 @@ export async function executeWorkerTaskWithStreaming(
 
   emitLog("Task received. Warming up local AI engine...");
   emitLog("AI Engine active. Allocating GPU memory...");
-  emitLog("Analyzing layout requirements...");
-  emitLog(
-    "Drafting React components and Tailwind styling (this may take a few minutes)...",
+  emitLog("Extracting Vision Blueprint...");
+
+  let blueprintCompletion: Awaited<
+    ReturnType<typeof engine.chat.completions.create>
+  > | null = null;
+  try {
+    blueprintCompletion = await createCompletionWithWorkerGuard(
+      () =>
+        engine.chat.completions.create({
+          messages: [
+            {
+              role: "system" as const,
+              content: VISION_BLUEPRINT_PROMPT,
+            },
+            {
+              role: "user" as const,
+              content: `File: ${taskPayload.fileName}\n\nInstructions: ${taskPayload.instructions}\n\nCreate the blueprint JSON now.`,
+            },
+          ],
+          temperature: 0.1,
+          max_tokens: 640,
+        }),
+      `Worker blueprint ${taskPayload.taskId}`,
+      BLUEPRINT_STAGE_TIMEOUT_MS,
+    );
+
+    if (!blueprintCompletion) {
+      emitLog(
+        "Worker blueprint initialization failed or timed out; continuing with empty blueprint.",
+      );
+    }
+  } catch (error) {
+    const message = normalizeWorkerModelError(
+      error,
+      "Worker vision blueprint generation failed",
+      STRICT_MODEL_LOAD_ERRORS.blueprint,
+    );
+    emitLog(message);
+    console.error(
+      "[Worker:Stream] Blueprint error, continuing with empty blueprint:",
+      error,
+    );
+  }
+
+  const parsedBlueprint = parseVisionBlueprint(
+    blueprintCompletion?.choices[0]?.message?.content || "",
   );
 
-  const systemPrompt = buildWorkerPromptWithContext(taskPayload.sharedContext);
+  if (!parsedBlueprint) {
+    emitLog(
+      "Vision blueprint parse failed; continuing with an empty blueprint shell.",
+    );
+  }
+
+  const uiBlueprint = parsedBlueprint || "{}";
+
+  emitLog("Vision blueprint extracted successfully.");
+  emitLog("Releasing 3B vision model before 7B coder handoff...");
+  await releaseEngineMemory(engine);
+  emitLog("3B vision model memory released. Loading 7B coder stage...");
+
+  // Explicitly reload the 7B coder model after releasing 3B memory.
+  emitLog("Generating React Architecture...");
+
+  try {
+    const reloadResult = await createCompletionWithWorkerGuard(
+      async () => {
+        await engine.reload(MODEL_CONFIGS["7B"].id);
+        return true;
+      },
+      `Worker coder reload ${taskPayload.taskId}`,
+      CODER_STAGE_TIMEOUT_MS,
+    );
+
+    if (!reloadResult) {
+      emitLog(
+        "7B coder load encountered a preload/runtime issue; continuing without blocking.",
+      );
+      return "";
+    }
+    emitLog("7B coder model loaded successfully.");
+  } catch (err) {
+    const message = normalizeWorkerModelError(
+      err,
+      "Failed to load 7B coder model",
+      STRICT_MODEL_LOAD_ERRORS.coder,
+    );
+    emitLog(message);
+    console.error("[Worker:Stream] Failed to reload 7B model:", err);
+    return "";
+  }
+
+  const systemPrompt = `${buildWorkerPromptWithContext(taskPayload.sharedContext)}
+
+UI BLUEPRINT:
+${uiBlueprint}
+
+Use the blueprint as the source of truth and output only runnable React code.`;
   const messages = [
     {
       role: "system" as const,
@@ -546,31 +862,68 @@ export async function executeWorkerTaskWithStreaming(
     },
   ];
 
-  const streamResponse = (await engine.chat.completions.create({
-    messages,
-    temperature: 0.3,
-    max_tokens: 1200,
-    stream: true,
-  })) as unknown;
+  let streamResponse: unknown;
+  try {
+    streamResponse = (await createCompletionWithWorkerGuard(
+      () =>
+        engine.chat.completions.create({
+          messages,
+          temperature: 0.2,
+          max_tokens: 900,
+          stream: true,
+        }),
+      `Streaming worker task ${taskPayload.taskId}`,
+      CODER_STAGE_TIMEOUT_MS,
+    )) as unknown;
+
+    if (!streamResponse) {
+      return "";
+    }
+  } catch (error) {
+    const errorMsg = normalizeWorkerModelError(
+      error,
+      "Failed to generate code",
+      STRICT_MODEL_LOAD_ERRORS.coder,
+    );
+    emitLog(errorMsg);
+    console.error("[Worker:Stream] Engine error:", error);
+    return "";
+  }
 
   let generatedCode = "";
 
-  if (streamResponse && Symbol.asyncIterator in Object(streamResponse)) {
-    for await (const chunkPayload of streamResponse as AsyncIterable<unknown>) {
-      const chunk = extractStreamContentChunk(chunkPayload);
-      if (!chunk) {
-        continue;
-      }
+  try {
+    if (streamResponse && Symbol.asyncIterator in Object(streamResponse)) {
+      for await (const chunkPayload of streamResponse as AsyncIterable<unknown>) {
+        const chunk = extractStreamContentChunk(chunkPayload);
+        if (!chunk) {
+          continue;
+        }
 
-      generatedCode += chunk;
-      callbacks.onChunk?.(chunk);
+        generatedCode += chunk;
+        callbacks.onChunk?.(chunk);
+      }
+    } else {
+      const singleChunk = extractStreamContentChunk(streamResponse);
+      if (singleChunk) {
+        generatedCode = singleChunk;
+        callbacks.onChunk?.(singleChunk);
+      }
     }
-  } else {
-    const singleChunk = extractStreamContentChunk(streamResponse);
-    if (singleChunk) {
-      generatedCode = singleChunk;
-      callbacks.onChunk?.(singleChunk);
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    emitLog(`Stream iteration error: ${errorMsg}`);
+    console.error("[Worker:Stream] Stream iteration error:", error);
+    // Return partial generated code so far instead of failing hard.
+    const partial = generatedCode.trim();
+    if (partial) {
+      emitLog("Returning partial generated code due to stream error.");
+      return partial
+        .replace(/```[\w]*\n/g, "")
+        .replace(/```/g, "")
+        .trim();
     }
+    return "";
   }
 
   const cleanCode = generatedCode
@@ -579,7 +932,8 @@ export async function executeWorkerTaskWithStreaming(
     .trim();
 
   if (!cleanCode) {
-    throw new Error("Worker stream produced an empty code payload.");
+    emitLog("Worker stream produced an empty code payload.");
+    return "";
   }
 
   return cleanCode;
@@ -616,11 +970,19 @@ export async function executeDebugAnalysisTask(
     },
   ];
 
-  const completion = await engine.chat.completions.create({
-    messages,
-    temperature: 0.1,
-    max_tokens: 600,
-  });
+  const completion = await createCompletionWithWorkerGuard(
+    () =>
+      engine.chat.completions.create({
+        messages,
+        temperature: 0.1,
+        max_tokens: 600,
+      }),
+    `Debug analysis ${taskPayload.taskId}`,
+  );
+
+  if (!completion) {
+    return "No findings.";
+  }
 
   return completion.choices[0]?.message?.content?.trim() || "No findings.";
 }

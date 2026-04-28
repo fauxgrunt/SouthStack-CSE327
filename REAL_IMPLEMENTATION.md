@@ -18,6 +18,7 @@ Added to `package.json`:
 ```
 
 Install with:
+
 ```bash
 npm install
 ```
@@ -41,11 +42,13 @@ server: {
 ```
 
 **What happens without these headers?**
+
 - ❌ Error: `SharedArrayBuffer is not defined`
 - ❌ WebContainer.boot() fails immediately
 - ❌ No in-browser Node.js execution
 
 **These headers are required because:**
+
 - WebContainer uses SharedArrayBuffer for memory sharing
 - Browser security policies require COEP + COOP for SharedArrayBuffer
 - Vite must send these headers from the dev server
@@ -96,16 +99,19 @@ await webContainerService.boot();
 webContainerService.isReady(); // boolean
 
 // Write files
-await webContainerService.writeFile('/index.js', code);
+await webContainerService.writeFile("/index.js", code);
 
 // Spawn process
-const process = await webContainerService.spawn('npm', ['install']);
+const process = await webContainerService.spawn("npm", ["install"]);
 
 // Execute and wait
-const { exitCode, output } = await webContainerService.exec('node', ['index.js']);
+const { exitCode, output } = await webContainerService.exec("node", [
+  "index.js",
+]);
 ```
 
 **Why Singleton?**
+
 - WebContainer.boot() is expensive (~1-2 seconds)
 - Should only be called once per application lifecycle
 - Multiple boot attempts cause errors
@@ -113,8 +119,8 @@ const { exitCode, output } = await webContainerService.exec('node', ['index.js']
 **Error Handling:**
 
 ```typescript
-if (typeof SharedArrayBuffer === 'undefined') {
-  throw new Error('COOP/COEP headers not set correctly');
+if (typeof SharedArrayBuffer === "undefined") {
+  throw new Error("COOP/COEP headers not set correctly");
 }
 ```
 
@@ -131,19 +137,23 @@ This catches the **most common misconfiguration** issue.
 **Features:**
 
 ✅ **Real Terminal Rendering**
+
 - Full ANSI color support
 - Cursor positioning
 - Scrollback buffer (10,000 lines)
 
 ✅ **Auto-Sizing**
+
 - FitAddon automatically resizes to container
 - Responds to window resize events
 
 ✅ **Stream Piping**
+
 - Accepts `ReadableStream<string>` from WebContainer
 - Pipes process output directly to terminal UI
 
 ✅ **Theming**
+
 - Custom dark theme optimized for code
 - Matches SouthStack brand colors
 
@@ -163,11 +173,11 @@ interface TerminalProps {
 const [stream, setStream] = useState<ReadableStream<string> | null>(null);
 
 // Start a process
-const process = await webContainerService.spawn('node', ['index.js']);
+const process = await webContainerService.spawn("node", ["index.js"]);
 setStream(process.output); // Terminal auto-updates!
 
 // Component
-<Terminal processStream={stream} height="400px" />
+<Terminal processStream={stream} height="400px" />;
 ```
 
 **Key xterm Features Used:**
@@ -209,38 +219,38 @@ async function executeAgenticLoop() {
   // 1. Generate Code (WebLLM)
   const completion = await engine.chat.completions.create({
     messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt }
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
     ],
   });
   const code = extractCode(completion.choices[0].message.content);
 
   // 2. Write Files (WebContainer)
-  await webContainerService.writeFile('/package.json', packageJson);
-  await webContainerService.writeFile('/index.js', code);
+  await webContainerService.writeFile("/package.json", packageJson);
+  await webContainerService.writeFile("/index.js", code);
 
   // 3. Install Dependencies (Real npm!)
-  const installProcess = await webContainerService.spawn('npm', ['install']);
+  const installProcess = await webContainerService.spawn("npm", ["install"]);
   setProcessStream(installProcess.output); // Show in terminal
   await installProcess.exit; // Wait for completion
 
   // 4. Execute Code (Real Node.js!)
-  const nodeProcess = await webContainerService.spawn('node', ['index.js']);
+  const nodeProcess = await webContainerService.spawn("node", ["index.js"]);
   setProcessStream(nodeProcess.output); // Show in terminal
-  
+
   // Process runs indefinitely (if it's a server)
 }
 ```
 
 ### Key Differences from Mock
 
-| Feature | Mock Version | Real Version |
-|---------|-------------|--------------|
-| File System | `Map<string, string>` | WebContainer Virtual FS |
-| Execution | Simulated with timeouts | Real Node.js in browser |
-| npm install | Faked success | Actual package installation |
-| Terminal | Text logs | Real xterm.js terminal |
-| Process Streams | N/A | Piped to UI in real-time |
+| Feature         | Mock Version            | Real Version                |
+| --------------- | ----------------------- | --------------------------- |
+| File System     | `Map<string, string>`   | WebContainer Virtual FS     |
+| Execution       | Simulated with timeouts | Real Node.js in browser     |
+| npm install     | Faked success           | Actual package installation |
+| Terminal        | Text logs               | Real xterm.js terminal      |
+| Process Streams | N/A                     | Piped to UI in real-time    |
 
 ---
 
@@ -251,7 +261,7 @@ async function executeAgenticLoop() {
 WebContainer processes return a `ReadableStream<string>`:
 
 ```typescript
-const process = await webContainer.spawn('node', ['index.js']);
+const process = await webContainer.spawn("node", ["index.js"]);
 // process.output is ReadableStream<string>
 ```
 
@@ -263,7 +273,7 @@ const reader = process.output.getReader();
 while (true) {
   const { done, value } = await reader.read();
   if (done) break;
-  
+
   // value is a string chunk
   terminal.write(value);
 }
@@ -276,6 +286,7 @@ while (true) {
 ```
 
 The component:
+
 1. Gets a reader from the stream
 2. Reads chunks in a loop
 3. Writes each chunk to xterm
@@ -287,13 +298,13 @@ The component:
 
 ### Initialization Times
 
-| Operation | Time | Notes |
-|-----------|------|-------|
-| WebLLM Model Load (first) | 120-180s | ~1GB download |
-| WebLLM Model Load (cached) | 5-10s | From IndexedDB |
-| WebContainer Boot | 1-2s | One-time per session |
-| npm install (small) | 5-15s | In-browser package fetch |
-| Code execution start | <100ms | Near-instant |
+| Operation                  | Time     | Notes                    |
+| -------------------------- | -------- | ------------------------ |
+| WebLLM Model Load (first)  | 120-180s | ~1GB download            |
+| WebLLM Model Load (cached) | 5-10s    | From IndexedDB           |
+| WebContainer Boot          | 1-2s     | One-time per session     |
+| npm install (small)        | 5-15s    | In-browser package fetch |
+| Code execution start       | <100ms   | Near-instant             |
 
 ### Memory Usage
 
@@ -311,6 +322,7 @@ The component:
 **Cause**: COOP/COEP headers not configured
 
 **Solution**: Check `vite.config.ts` headers are correct
+
 ```typescript
 headers: {
   'Cross-Origin-Embedder-Policy': 'require-corp',
@@ -319,6 +331,7 @@ headers: {
 ```
 
 **Verify headers in browser DevTools:**
+
 - Network tab → Select localhost request
 - Response Headers → Check for COEP and COOP
 
@@ -327,24 +340,28 @@ headers: {
 **Cause**: Process stream not connected or CSS not loaded
 
 **Solution**:
+
 1. Check `@import '@xterm/xterm/css/xterm.css';` in styles.css
 2. Verify processStream is passed to Terminal component
 3. Check terminal ref is mounted before writing
 
-### Issue 3: npm install hangs
+### Issue 3: Local P2P handshake fails
 
-**Cause**: WebContainer may be downloading packages
+**Cause**: Devices are not using the same LAN hotspot or local signaling host.
 
 **Solution**:
-- Wait longer (first install takes time)
-- Check browser console for WebContainer errors
-- Verify network access (WebContainer fetches from npm CDN)
+
+- Connect both devices to the same local hotspot
+- Run local signaling on laptop: `npx peerjs --port 9000 --path /peerjs`
+- Set `VITE_PEER_SIGNAL_HOST` to the laptop LAN IP
+- Ensure local firewall allows signaling port access
 
 ### Issue 4: Code doesn't execute
 
 **Cause**: Several possibilities
 
 **Debug steps:**
+
 1. Check generated code syntax (view in preview)
 2. Look for npm install errors in terminal
 3. Check package.json dependencies are valid
@@ -355,6 +372,7 @@ headers: {
 **Cause**: GPU VRAM exhausted
 
 **Solution**:
+
 - Close other browser tabs
 - Restart browser
 - Use smaller model (edit MODEL_ID in App.tsx)
@@ -437,12 +455,12 @@ Example: "Write an Express.js server with a /health endpoint"
 const container = await WebContainer.boot();
 
 // File operations
-await container.fs.writeFile('/file.js', content);
-const content = await container.fs.readFile('/file.js', 'utf-8');
-await container.fs.mkdir('/dir', { recursive: true });
+await container.fs.writeFile("/file.js", content);
+const content = await container.fs.readFile("/file.js", "utf-8");
+await container.fs.mkdir("/dir", { recursive: true });
 
 // Process spawning
-const process = await container.spawn('node', ['index.js']);
+const process = await container.spawn("node", ["index.js"]);
 const exitCode = await process.exit;
 
 // Stream handling
@@ -458,7 +476,7 @@ await engine.reload(MODEL_ID);
 
 // Generate
 const completion = await engine.chat.completions.create({
-  messages: [{ role: 'user', content: 'prompt' }],
+  messages: [{ role: "user", content: "prompt" }],
   temperature: 0.7,
   max_tokens: 1024,
 });
@@ -530,6 +548,31 @@ Before running, verify:
 - [ ] WebGPU enabled (check `navigator.gpu`)
 - [ ] At least 4GB VRAM available
 - [ ] Dev server running on port 3000
+
+---
+
+## 📶 P2P Edge Computing Instructions
+
+For LAN-only swarm execution:
+
+1. Run local PeerJS signaling on the laptop:
+
+```bash
+npx peerjs --port 9000 --path /peerjs
+```
+
+2. Set app env vars:
+
+```bash
+VITE_PEER_SIGNAL_HOST=YOUR_LAPTOP_LAN_IP
+VITE_PEER_SIGNAL_PORT=9000
+VITE_PEER_SIGNAL_PATH=/peerjs
+VITE_PEER_SIGNAL_SECURE=false
+```
+
+3. Join the same hotspot on both devices.
+
+4. Start master on phone, worker on laptop, and exchange peer IDs.
 
 ---
 

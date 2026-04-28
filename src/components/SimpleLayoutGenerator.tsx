@@ -172,7 +172,8 @@ export const SimpleLayoutGenerator: React.FC<SimpleLayoutGeneratorProps> = ({
             {model.title}
           </h2>
           <p className="mt-2 text-sm leading-6 text-slate-300">
-            Deterministic layout generated from the Gemini structure summary.
+            Deterministic layout generated from the EdgeVision-V1 structure
+            summary.
           </p>
         </div>
 

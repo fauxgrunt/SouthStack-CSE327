@@ -11,7 +11,7 @@ import { useVoiceInput } from "./hooks/useVoiceInput";
  * SouthStack - Real Agentic Loop Implementation
  *
  * This is the production implementation that:
- * 1. Loads WebLLM (Llama-3.2-1B) for code generation
+ * 1. Loads WebLLM (Qwen 2.5 Coder 7B) for code generation
  * 2. Boots WebContainer for in-browser Node.js execution
  * 3. Implements autonomous loop: Generate → Execute → Debug
  */
@@ -60,6 +60,11 @@ const App: React.FC = () => {
 
   const promptVoice = useVoiceInput(appendPromptTranscript);
 
+  // Add log entry
+  function addLog(message: string, type: LogEntry["type"] = "info") {
+    setLogs((prev) => [...prev, { timestamp: new Date(), message, type }]);
+  }
+
   // Monitor online/offline status
   useEffect(() => {
     const handleOnline = () => {
@@ -83,11 +88,6 @@ const App: React.FC = () => {
       window.removeEventListener("offline", handleOffline);
     };
   }, []);
-
-  // Add log entry
-  const addLog = (message: string, type: LogEntry["type"] = "info") => {
-    setLogs((prev) => [...prev, { timestamp: new Date(), message, type }]);
-  };
 
   // Auto-scroll logs
   useEffect(() => {
@@ -154,9 +154,9 @@ const App: React.FC = () => {
         addLog(report.text, "info");
       });
 
-      addLog("Loading Llama-3.2-1B model...", "info");
-      await engine.reload("Llama-3.2-1B-Instruct-q4f16_1-MLC", {
-        context_window_size: 2048,
+      addLog("Loading Qwen 2.5 Coder 7B model...", "info");
+      await engine.reload("Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC", {
+        context_window_size: 4096,
       });
       addLog("[OK] WebLLM ready!", "success");
 

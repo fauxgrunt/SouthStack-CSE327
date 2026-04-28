@@ -13,11 +13,13 @@ Get SouthStack running in 5 minutes!
 ### Check WebGPU Support
 
 Open your browser console and run:
+
 ```javascript
-navigator.gpu ? '✅ WebGPU Supported' : '❌ WebGPU Not Available'
+navigator.gpu ? "✅ WebGPU Supported" : "❌ WebGPU Not Available";
 ```
 
 If not supported, update to Chrome/Edge 113+ or enable the flag:
+
 ```
 chrome://flags/#enable-unsafe-webgpu
 ```
@@ -41,6 +43,31 @@ Server will start at `http://localhost:3000`
 
 ---
 
+## Local Hotspot Setup (LAN-Only)
+
+Use this mode for 100% local P2P signaling and worker execution.
+
+1. Start a local PeerJS signaling server on the laptop (same LAN/hotspot):
+
+```bash
+npx peerjs --port 9000 --path /peerjs
+```
+
+2. Configure the app environment:
+
+```bash
+VITE_PEER_SIGNAL_HOST=YOUR_LAPTOP_LAN_IP
+VITE_PEER_SIGNAL_PORT=9000
+VITE_PEER_SIGNAL_PATH=/peerjs
+VITE_PEER_SIGNAL_SECURE=false
+```
+
+3. Connect phone and laptop to the same hotspot.
+
+4. Open the app on both devices and connect nodes using peer IDs.
+
+---
+
 ## First Run Workflow
 
 ### Step 1: Open the Application
@@ -52,11 +79,13 @@ Navigate to `http://localhost:3000` in your browser.
 Click the blue **"🚀 Initialize AI Engine"** button.
 
 **What happens:**
+
 - Downloads Qwen-2.5-Coder model (~1GB)
 - Caches in IndexedDB (one-time process)
 - Takes 2-5 minutes depending on your connection
 
 **Progress indicators:**
+
 ```
 ⏳ Loading model...
 📦 Downloading: 45%
@@ -77,6 +106,7 @@ Click **"⚡ Execute Agentic Loop"**
 ### Step 4: Watch the Magic
 
 The system will:
+
 1. 🤖 **Generate** code using local AI
 2. ⚙️ **Execute** code in virtual Node.js environment
 3. 🔧 **Self-heal** if errors occur (up to 3 attempts)
@@ -121,6 +151,7 @@ Use TensorFlow and PyTorch  [Not available in WebContainers]
 ### Issue: "WebGPU not supported"
 
 **Solution:**
+
 - Update to Chrome 113+ or Edge 113+
 - Enable WebGPU flag if needed
 - Check GPU drivers are up to date
@@ -128,22 +159,25 @@ Use TensorFlow and PyTorch  [Not available in WebContainers]
 ### Issue: "Out of memory" during model load
 
 **Solution:**
+
 1. Close unnecessary browser tabs
 2. Close other GPU-intensive applications
 3. Restart browser to clear GPU memory
 4. Try a smaller model (edit `MODEL_ID` in `useAgenticLoop.ts`)
 
-### Issue: Model download fails
+### Issue: Local P2P connection fails
 
 **Solution:**
-- Check internet connection
-- Disable ad blockers (may interfere with CDN)
-- Clear browser cache
-- Try again (download resumes automatically)
+
+- Verify both devices are on the same local hotspot
+- Confirm signaling server is running on the laptop (`npx peerjs --port 9000 --path /peerjs`)
+- Confirm `VITE_PEER_SIGNAL_HOST` points to the laptop's LAN IP
+- Check local firewall rules for the signaling port
 
 ### Issue: Code execution fails repeatedly
 
 **Solution:**
+
 - Check the logs for specific error messages
 - Try a simpler prompt first
 - Verify the generated code in the preview
@@ -152,6 +186,7 @@ Use TensorFlow and PyTorch  [Not available in WebContainers]
 ### Issue: Slow inference (<10 tokens/sec)
 
 **Solution:**
+
 - Check GPU utilization (should be high)
 - Close other tabs/apps using GPU
 - Integrated GPUs may be slower than dedicated
@@ -163,18 +198,19 @@ Use TensorFlow and PyTorch  [Not available in WebContainers]
 
 ### Status Indicators
 
-| Indicator | Meaning |
-|-----------|---------|
+| Indicator          | Meaning                              |
+| ------------------ | ------------------------------------ |
 | 🟢 Ready (Offline) | AI engine loaded, system operational |
-| 🔵 Generating | AI is creating code |
-| 🟡 Executing | Code is running in WebContainer |
-| 🟠 Fixing | Self-healing attempt in progress |
-| 🟢 Completed | Task successful |
-| 🔴 Error | Fatal error occurred |
+| 🔵 Generating      | AI is creating code                  |
+| 🟡 Executing       | Code is running in WebContainer      |
+| 🟠 Fixing          | Self-healing attempt in progress     |
+| 🟢 Completed       | Task successful                      |
+| 🔴 Error           | Fatal error occurred                 |
 
 ### Execution Logs
 
 Real-time logs show:
+
 - Model download progress
 - Code generation status
 - Execution results
@@ -199,6 +235,7 @@ Once the model is loaded (status shows "✅ Model loaded"):
 4. Code execution happens in browser's WebContainer
 
 **To verify offline mode:**
+
 - Disable network in DevTools
 - Disconnect WiFi
 - Try generating code - it should still work!
@@ -212,19 +249,22 @@ Once the model is loaded (status shows "✅ Model loaded"):
 Open DevTools and check:
 
 **GPU Usage:**
+
 ```
 Task Manager → GPU → Chrome process
 ```
 
 **Memory:**
+
 ```
 DevTools → Memory → Take heap snapshot
 ```
 
 **WebGPU Logs:**
+
 ```javascript
 // In browser console
-performance.getEntriesByType('measure')
+performance.getEntriesByType("measure");
 ```
 
 ### Modifying the Model
@@ -232,9 +272,9 @@ performance.getEntriesByType('measure')
 Edit [src/hooks/useAgenticLoop.ts](src/hooks/useAgenticLoop.ts):
 
 ```typescript
-const MODEL_ID = 'Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC';
+const MODEL_ID = "Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC";
 // Change to:
-const MODEL_ID = 'Llama-3.2-1B-Instruct-q4f16_1-MLC'; // Faster, less accurate
+const MODEL_ID = "Llama-3.2-1B-Instruct-q4f16_1-MLC"; // Faster, less accurate
 ```
 
 Available models: https://github.com/mlc-ai/web-llm#available-models
@@ -254,7 +294,7 @@ Modify `buildSystemPrompt()` function to customize AI behavior:
 function buildSystemPrompt(ragContext?: string[]): string {
   return `You are a senior software engineer specializing in Node.js.
   Focus on: error handling, TypeScript types, modern ES6+ syntax.
-  ${ragContext ? 'Context:\n' + ragContext.join('\n') : ''}`;
+  ${ragContext ? "Context:\n" + ragContext.join("\n") : ""}`;
 }
 ```
 

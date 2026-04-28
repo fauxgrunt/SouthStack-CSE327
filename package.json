@@ -4,7 +4,8 @@
   "description": "Offline-First Agentic AI IDE running entirely in the browser",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "concurrently \"peerjs --port 9000 --path /peerjs\" \"vite --host 0.0.0.0\"",
+    "dev:swarm": "concurrently \"peerjs --port 9000 --path /peerjs\" \"vite --host 0.0.0.0\"",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 50"
@@ -36,9 +37,11 @@
     "@typescript-eslint/parser": "^7.13.1",
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.4.19",
+    "concurrently": "^9.2.1",
     "eslint": "^8.57.0",
     "eslint-plugin-react-hooks": "^4.6.2",
     "eslint-plugin-react-refresh": "^0.4.7",
+    "peer": "^1.0.2",
     "postcss": "^8.4.38",
     "tailwindcss": "^3.4.4",
     "typescript": "^5.5.3",

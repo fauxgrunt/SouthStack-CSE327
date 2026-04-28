@@ -48,6 +48,8 @@ export interface ImageUiTaskMessage {
   type: "IMAGE_UI_TASK";
   taskId: string;
   prompt: string;
+  imageBytes?: ArrayBuffer;
+  imageMimeType?: string;
   imageBase64?: string;
   imageName?: string;
   imageDescription?: string;
@@ -67,8 +69,8 @@ export interface ImageUiResultMessage {
   error?: string;
 }
 
-export interface WorkerLogMessage {
-  type: "WORKER_LOG";
+export interface WorkerStatusMessage {
+  type: "WORKER_STATUS";
   taskId?: string;
   message: string;
 }
@@ -113,8 +115,8 @@ type ImageUiResultHandler = (
   conn: DataConnection,
 ) => void | Promise<void>;
 
-type WorkerLogHandler = (
-  payload: WorkerLogMessage,
+type WorkerStatusHandler = (
+  payload: WorkerStatusMessage,
   conn: DataConnection,
 ) => void | Promise<void>;
 
@@ -263,7 +265,7 @@ export const useSwarmManager = (
   const imageUiTaskHandlerRef = useRef<ImageUiTaskHandler | null>(null);
   const imageUiStatusHandlerRef = useRef<ImageUiStatusHandler | null>(null);
   const imageUiResultHandlerRef = useRef<ImageUiResultHandler | null>(null);
-  const workerLogHandlerRef = useRef<WorkerLogHandler | null>(null);
+  const workerStatusHandlerRef = useRef<WorkerStatusHandler | null>(null);
   const workerStreamHandlerRef = useRef<WorkerStreamHandler | null>(null);
   const workerCompleteHandlerRef = useRef<WorkerCompleteHandler | null>(null);
   const handleTaskTimeoutRef = useRef<(taskId: string) => Promise<void>>(
@@ -378,8 +380,12 @@ export const useSwarmManager = (
     [],
   );
 
-  const onWorkerLog = useCallback((handler: WorkerLogHandler | null) => {
-    workerLogHandlerRef.current = handler;
+  const onWorkerStatus = useCallback((handler: WorkerStatusHandler | null) => {
+    workerStatusHandlerRef.current = handler;
+  }, []);
+
+  const onWorkerLog = useCallback((handler: WorkerStatusHandler | null) => {
+    workerStatusHandlerRef.current = handler;
   }, []);
 
   const onWorkerStream = useCallback((handler: WorkerStreamHandler | null) => {
@@ -585,7 +591,7 @@ export const useSwarmManager = (
   }, [persistSwarmState]);
 
   /**
-   * Handle task timeout - execute locally as fallback
+   * Handle task timeout - fail task if reassignment is unavailable
    */
   const handleTaskTimeout = useCallback(
     async (taskId: string) => {
@@ -603,163 +609,38 @@ export const useSwarmManager = (
       }
 
       if (taskId.startsWith("debug_")) {
-        if (!engine) {
-          taskTrackerRef.current.failTask(taskId, "Debug analysis timed out");
-          inflightPayloadsRef.current.delete(taskId);
-          return;
-        }
-
-        const payload = buildTaskPayloadFromTracker(taskId);
-        if (!payload) {
-          taskTrackerRef.current.failTask(
-            taskId,
-            "Debug analysis timed out and payload was unavailable",
-          );
-          inflightPayloadsRef.current.delete(taskId);
-          return;
-        }
-
-        try {
-          const analysis = await executeDebugAnalysisTask(payload, engine);
-          taskTrackerRef.current.completeTask(taskId, analysis);
-          inflightPayloadsRef.current.delete(taskId);
-
-          const reportFileName = `debug-reports/${payload.fileName.replace(/[\\/:*?"<>|]/g, "_")}.chunk-${payload.chunkIndex ?? 0}.${taskId}.md`;
-          await fileQueueRef.current!.enqueue(reportFileName, analysis);
-        } catch (error) {
-          taskTrackerRef.current.failTask(
-            taskId,
-            `Debug timeout fallback failed: ${error}`,
-          );
-        }
+        taskTrackerRef.current.failTask(
+          taskId,
+          "Debug analysis timed out and no worker reassignment was possible.",
+        );
+        inflightPayloadsRef.current.delete(taskId);
 
         persistSwarmState();
         return;
       }
 
-      if (!engine) {
-        console.error(
-          "[SwarmManager:Master] Cannot execute timed-out task: Engine not initialized",
-        );
-        taskTrackerRef.current.failTask(
-          taskId,
-          "Timeout - Engine not available for local execution",
-        );
-        return;
-      }
-
-      console.log(
-        `[SwarmManager:Master] Executing timed-out task locally: ${taskId}`,
+      taskTrackerRef.current.failTask(
+        taskId,
+        "Task timed out and no worker reassignment was possible.",
       );
-      setCurrentTask(`Fallback: ${tracked.assignment.fileName}`);
-
-      try {
-        // Create task payload for local execution
-        const taskPayload: SwarmTaskPayload = {
-          taskId,
-          fileName: tracked.assignment.fileName,
-          instructions: tracked.assignment.instructions,
-          type: "TASK_ASSIGN",
-        };
-
-        // Execute locally
-        const generatedCode = await executeWorkerTask(taskPayload, engine);
-
-        // Queue the file write
-        await fileQueueRef.current!.enqueue(
-          tracked.assignment.fileName,
-          generatedCode,
-        );
-
-        // Update tracker
-        taskTrackerRef.current.completeTask(taskId, generatedCode);
-        inflightPayloadsRef.current.delete(taskId);
-        console.log(
-          `[SwarmManager:Master] Successfully executed timed-out task locally: ${taskId}`,
-        );
-      } catch (error) {
-        console.error(
-          `[SwarmManager:Master] Failed to execute timed-out task locally: ${taskId}`,
-          error,
-        );
-        taskTrackerRef.current.failTask(
-          taskId,
-          `Local execution failed: ${error}`,
-        );
-      } finally {
-        setCurrentTask(null);
-      }
+      inflightPayloadsRef.current.delete(taskId);
 
       // Check if all tasks are complete
       if (taskTrackerRef.current.isAllCompleted()) {
         console.log(
-          "[SwarmManager:Master] All tasks completed (including fallbacks)!",
+          "[SwarmManager:Master] All tracked tasks reached terminal state.",
         );
         setIsProcessing(false);
       }
 
       persistSwarmState();
     },
-    [
-      engine,
-      persistSwarmState,
-      reassignPendingTasksForNode,
-      buildTaskPayloadFromTracker,
-    ],
+    [persistSwarmState, reassignPendingTasksForNode],
   );
 
   useEffect(() => {
     handleTaskTimeoutRef.current = handleTaskTimeout;
   }, [handleTaskTimeout]);
-
-  const createAndDispatchFallbackTask = useCallback(
-    (userPrompt: string) => {
-      const targetConnection = pickNextOpenConnection();
-
-      if (!targetConnection) {
-        throw new Error("No active worker connections");
-      }
-
-      const taskId = `task_raw_${Date.now()}`;
-      const fallbackAssignment: TaskAssignment = {
-        fileName: "swarm/raw-task.ts",
-        instructions: userPrompt,
-      };
-
-      const payload: SwarmTaskPayload = {
-        type: "TASK_ASSIGN",
-        taskId,
-        fileName: fallbackAssignment.fileName,
-        instructions: fallbackAssignment.instructions,
-        sharedContext:
-          "Decomposition bypassed. Execute this as a direct single-task request.",
-      };
-
-      const sent = sendTaskToNode(targetConnection, payload);
-
-      if (!sent) {
-        throw new Error("Failed to dispatch fallback task");
-      }
-
-      console.warn(
-        "[SwarmManager:Master] Decomposition bypass active - dispatched raw task",
-        {
-          taskId,
-          nodeId: targetConnection.peer,
-          fileName: fallbackAssignment.fileName,
-        },
-      );
-
-      return [
-        {
-          taskId,
-          assignment: fallbackAssignment,
-          nodeId: targetConnection.peer,
-        },
-      ];
-    },
-    [pickNextOpenConnection, sendTaskToNode],
-  );
 
   const ensureDebugQueueBuffered = useCallback(async (targetSize: number) => {
     while (
@@ -1366,8 +1247,19 @@ export const useSwarmManager = (
           return;
         }
 
-        if (typed.type === "WORKER_LOG" && workerLogHandlerRef.current) {
-          void workerLogHandlerRef.current(typed as WorkerLogMessage, conn);
+        if (
+          (typed.type === "WORKER_STATUS" || typed.type === "WORKER_LOG") &&
+          workerStatusHandlerRef.current
+        ) {
+          void workerStatusHandlerRef.current(
+            (typed.type === "WORKER_STATUS"
+              ? typed
+              : {
+                  ...typed,
+                  type: "WORKER_STATUS",
+                }) as WorkerStatusMessage,
+            conn,
+          );
           return;
         }
 
@@ -1595,31 +1487,10 @@ export const useSwarmManager = (
           continue;
         }
 
-        if (!engine) {
-          taskTrackerRef.current.startTimeout(task.taskId, handleTaskTimeout);
-          continue;
-        }
-
-        try {
-          if (task.taskId.startsWith("debug_")) {
-            const analysis = await executeDebugAnalysisTask(payload, engine);
-            taskTrackerRef.current.completeTask(task.taskId, analysis);
-            const reportFileName = `debug-reports/${payload.fileName.replace(/[\\/:*?"<>|]/g, "_")}.chunk-${payload.chunkIndex ?? 0}.${task.taskId}.md`;
-            await fileQueueRef.current!.enqueue(reportFileName, analysis);
-          } else {
-            const generatedCode = await executeWorkerTask(payload, engine);
-            await fileQueueRef.current!.enqueue(
-              payload.fileName,
-              generatedCode,
-            );
-            taskTrackerRef.current.completeTask(task.taskId, generatedCode);
-          }
-        } catch (error) {
-          taskTrackerRef.current.failTask(
-            task.taskId,
-            `Recovery local execution failed: ${error}`,
-          );
-        }
+        taskTrackerRef.current.failTask(
+          task.taskId,
+          "Recovery failed: no connected worker available for reassignment.",
+        );
       }
 
       if (taskTrackerRef.current.isAllCompleted()) {
@@ -1634,7 +1505,6 @@ export const useSwarmManager = (
     }
   }, [
     buildTaskPayloadFromTracker,
-    engine,
     handleTaskTimeout,
     persistSwarmState,
     pickNextOpenConnection,
@@ -1780,45 +1650,30 @@ export const useSwarmManager = (
             .map((c) => c.peer),
         });
 
-        let assignments: {
-          taskId: string;
-          assignment: TaskAssignment;
-          nodeId: string;
-        }[];
-
         if (!engine) {
-          console.warn(
-            "[SwarmManager:Master] Engine unavailable. Bypassing decomposition and dispatching raw task.",
+          throw new Error(
+            "Engine unavailable on master node; strict swarm mode does not allow fallback dispatch.",
           );
-          assignments = createAndDispatchFallbackTask(userPrompt);
-        } else {
-          try {
-            assignments = await Promise.race([
-              orchestrateSwarm(
-                userPrompt,
-                engine,
-                connections.filter((c) => c.open),
-                sendTaskToNode,
-              ),
-              new Promise<never>((_, reject) => {
-                setTimeout(() => {
-                  reject(
-                    new Error("Task decomposition timed out after 20 seconds"),
-                  );
-                }, 20000);
-              }),
-            ]);
-          } catch (decompositionError) {
-            console.error(
-              "[SwarmManager:Master] Decomposition step failed. Falling back to raw dispatch.",
-              decompositionError,
-            );
-            assignments = createAndDispatchFallbackTask(userPrompt);
-          }
         }
 
+        const resolvedAssignments = await Promise.race([
+          orchestrateSwarm(
+            userPrompt,
+            engine,
+            connections.filter((c) => c.open),
+            sendTaskToNode,
+          ),
+          new Promise<never>((_, reject) => {
+            setTimeout(() => {
+              reject(
+                new Error("Task decomposition timed out after 20 seconds"),
+              );
+            }, 20000);
+          }),
+        ]);
+
         // Track all tasks and START TIMEOUT MONITORING
-        assignments.forEach(({ taskId, assignment, nodeId }) => {
+        resolvedAssignments.forEach(({ taskId, assignment, nodeId }) => {
           console.log("[SwarmManager:Master] Assignment created:", {
             taskId,
             nodeId,
@@ -1838,15 +1693,15 @@ export const useSwarmManager = (
           taskTrackerRef.current.startTimeout(taskId, handleTaskTimeout);
         });
 
-        setDistributedTasks(assignments.map((a) => a.assignment));
-        setCurrentTask(`Distributed ${assignments.length} tasks`);
+        setDistributedTasks(resolvedAssignments.map((a) => a.assignment));
+        setCurrentTask(`Distributed ${resolvedAssignments.length} tasks`);
         persistSwarmState();
 
         console.log(
-          `[SwarmManager:Master] Successfully distributed ${assignments.length} tasks with timeout monitoring`,
+          `[SwarmManager:Master] Successfully distributed ${resolvedAssignments.length} tasks with timeout monitoring`,
         );
 
-        return assignments;
+        return resolvedAssignments;
       } catch (error) {
         console.error(
           "[SwarmManager:Master] Failed to distribute task:",
@@ -1864,7 +1719,6 @@ export const useSwarmManager = (
       connections,
       sendTaskToNode,
       handleTaskTimeout,
-      createAndDispatchFallbackTask,
       inflightPayloadsRef,
       persistSwarmState,
     ],
@@ -1943,6 +1797,7 @@ export const useSwarmManager = (
     onImageUiTask,
     onImageUiStatus,
     onImageUiResult,
+    onWorkerStatus,
     onWorkerLog,
     onWorkerStream,
     onWorkerComplete,
