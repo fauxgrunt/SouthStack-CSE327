@@ -78,6 +78,10 @@ interface InferenceProfile {
   temperature: number;
   retryAttempts: number;
   runBuildValidation: boolean;
+  useVisionBlueprint: boolean;
+  prewarmPreviewRuntime: boolean;
+  completionTimeoutMs: number;
+  structuredSpecTimeoutMs: number;
 }
 
 interface EdgeVisionV1UiSpec {
@@ -102,8 +106,8 @@ const WEBLLM_CONTEXT_SAFETY_MARGIN = 128;
 const DEV_SERVER_STARTUP_TIMEOUT_MS = 90000;
 const WEBCONTAINER_WARMUP_TIMEOUT_MS = 4000;
 const WEBCONTAINER_EXECUTION_BOOT_TIMEOUT_MS = 30000;
-const STRUCTURED_SPEC_TIMEOUT_MS = 1500;
-const LLM_COMPLETION_TIMEOUT_MS = 25000;
+const DEFAULT_STRUCTURED_SPEC_TIMEOUT_MS = 120000;
+const DEFAULT_LLM_COMPLETION_TIMEOUT_MS = 60000;
 const PREWARM_BOOT_TIMEOUT_MS = 45000;
 const MAX_UI_SPEC_SECTIONS = 8;
 const MAX_UI_SPEC_ITEMS = 6;
@@ -119,6 +123,22 @@ function isDisposedEngineError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /disposed|already been disposed|engine has been disposed/i.test(
     message,
+  );
+}
+
+function isInvalidExternalInstanceError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /valid external instance reference no longer exists|external instance reference/i.test(
+    message,
+  );
+}
+
+function isRecoverableEngineInstanceError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    isDisposedEngineError(error) ||
+    isInvalidExternalInstanceError(error) ||
+    /context lost|device lost|gpu device/i.test(message)
   );
 }
 
@@ -224,19 +244,42 @@ export const useAgenticLoop = () => {
 
   const reloadLockedModel = useCallback(
     async (modelType: ModelType, phase: string): Promise<void> => {
-      const engine = engineRef.current;
+      const loadModel = async (engine: webllm.MLCEngine) => {
+        await engine.reload(modelConfig.id, {
+          context_window_size: inferenceProfileRef.current.contextWindowSize,
+        });
+      };
+
+      const modelConfig = MODEL_CONFIGS[modelType];
+      let engine = engineRef.current;
       if (!engine) {
         throw new Error("WebLLM engine is not initialized.");
       }
 
-      const modelConfig = MODEL_CONFIGS[modelType];
-
       try {
-        await engine.reload(modelConfig.id, {
-          context_window_size: inferenceProfileRef.current.contextWindowSize,
-        });
+        await loadModel(engine);
         setState((prev) => ({ ...prev, selectedModel: modelType }));
       } catch (error) {
+        if (isRecoverableEngineInstanceError(error)) {
+          addLog(
+            phase,
+            "WebLLM engine instance became invalid. Reinitializing and retrying model load once...",
+            "warning",
+          );
+
+          clearSharedEngineCache();
+          engine = await getSharedEngine();
+          engineRef.current = engine;
+
+          try {
+            await loadModel(engine);
+            setState((prev) => ({ ...prev, selectedModel: modelType }));
+            return;
+          } catch (retryError) {
+            error = retryError;
+          }
+        }
+
         const errorMessage =
           error instanceof Error ? error.message : String(error);
         const normalizedMessage =
@@ -248,7 +291,7 @@ export const useAgenticLoop = () => {
         throw new Error(normalizedMessage);
       }
     },
-    [addLog],
+    [addLog, getSharedEngine],
   );
 
   const resetGeneratedCanvas = useCallback((): void => {
@@ -512,6 +555,22 @@ export const useAgenticLoop = () => {
         "info",
       );
 
+      if (!inferenceProfileRef.current.prewarmPreviewRuntime) {
+        addLog(
+          "initialization",
+          "Low-end optimization active: background preview prewarm is disabled.",
+          "warning",
+        );
+      }
+
+      if (!inferenceProfileRef.current.useVisionBlueprint) {
+        addLog(
+          "initialization",
+          "Low-end optimization active: image blueprint stage disabled to avoid 3B/7B model thrashing.",
+          "warning",
+        );
+      }
+
       addLog(
         "initialization",
         hasWebGPU
@@ -528,9 +587,15 @@ export const useAgenticLoop = () => {
         typeof SharedArrayBuffer !== "undefined" ? "success" : "error",
       );
 
-      // Warm runtime asynchronously so engine readiness is not blocked by WebContainer boot.
-      addLog("initialization", "Warming WebContainer in background...", "info");
-      void ensureWebContainerReady(WEBCONTAINER_WARMUP_TIMEOUT_MS, "warmup");
+      // Warm runtime asynchronously only when profile allows prewarm.
+      if (inferenceProfileRef.current.prewarmPreviewRuntime) {
+        addLog(
+          "initialization",
+          "Warming WebContainer in background...",
+          "info",
+        );
+        void ensureWebContainerReady(WEBCONTAINER_WARMUP_TIMEOUT_MS, "warmup");
+      }
 
       if (!hasWebGPU) {
         engineRef.current = null;
@@ -595,8 +660,10 @@ export const useAgenticLoop = () => {
         initProgress: 100,
       }));
 
-      // Pre-install preview runtime in background to reduce first-generation latency.
-      void prewarmPreviewRuntime();
+      // Pre-install preview runtime in background only on capable devices.
+      if (inferenceProfileRef.current.prewarmPreviewRuntime) {
+        void prewarmPreviewRuntime();
+      }
     } catch (error: any) {
       const errorMsg = error.message || "Failed to initialize WebLLM";
       addLog("initialization", `ERROR: ${errorMsg}`, "error");
@@ -696,7 +763,7 @@ export const useAgenticLoop = () => {
               );
             }
 
-            if (imageLedPrompt) {
+            if (imageLedPrompt && profile.useVisionBlueprint) {
               const visionSystemPrompt = `You are the 3B Vision Blueprint stage for SouthStack.
 Return exactly one JSON object and nothing else.
 Schema:
@@ -755,7 +822,7 @@ Rules:
                   temperature: 0.15,
                   max_tokens: Math.min(768, profile.maxCompletionTokens),
                 }),
-                STRUCTURED_SPEC_TIMEOUT_MS,
+                profile.structuredSpecTimeoutMs,
               );
 
               if (!blueprintCompletion) {
@@ -836,12 +903,61 @@ Rules:
                   temperature: profile.temperature,
                   max_tokens: profile.maxCompletionTokens,
                 }),
-                LLM_COMPLETION_TIMEOUT_MS,
+                profile.completionTimeoutMs,
               );
 
               if (!completion) {
                 throw new Error(
                   "Model completion timed out during React generation.",
+                );
+              }
+
+              currentCode = extractCode(
+                completion.choices[0].message.content || "",
+              );
+            } else if (imageLedPrompt && !profile.useVisionBlueprint) {
+              addLog(
+                "generation",
+                "Low-end mode: skipping dedicated 3B blueprint stage and generating directly with coder model.",
+                "warning",
+              );
+
+              const systemPrompt = buildSystemPrompt(ragContext, "7B");
+              const coderWindow = fitPromptToContextWindow(
+                systemPrompt,
+                compactUserMessage,
+                {
+                  contextWindowSize: profile.contextWindowSize,
+                  maxCompletionTokens: profile.maxCompletionTokens,
+                  safetyMarginTokens: WEBLLM_CONTEXT_SAFETY_MARGIN,
+                },
+              );
+
+              if (coderWindow.wasTruncated) {
+                addLog(
+                  "generation",
+                  `[Warning] Prompt truncated to fit context window. (~${coderWindow.estimatedPromptTokens} prompt tokens)`,
+                  "warning",
+                );
+              }
+
+              await reloadLockedModel("7B", "generation");
+
+              const completion = await withTimeout(
+                engineRef.current.chat.completions.create({
+                  messages: [
+                    { role: "system", content: systemPrompt },
+                    { role: "user", content: coderWindow.userPrompt },
+                  ],
+                  temperature: profile.temperature,
+                  max_tokens: profile.maxCompletionTokens,
+                }),
+                profile.completionTimeoutMs,
+              );
+
+              if (!completion) {
+                throw new Error(
+                  "Model completion timed out during low-end image-led generation.",
                 );
               }
 
@@ -887,7 +1003,7 @@ Rules:
                   temperature: profile.temperature,
                   max_tokens: profile.maxCompletionTokens,
                 }),
-                LLM_COMPLETION_TIMEOUT_MS,
+                profile.completionTimeoutMs,
               );
 
               if (!completion) {
@@ -1255,22 +1371,30 @@ function buildInferenceProfile(
   if (!hasWebGPU) {
     return {
       name: "lite",
-      contextWindowSize: 1536,
-      maxCompletionTokens: 256,
+      contextWindowSize: 1024,
+      maxCompletionTokens: 128,
       temperature: 0.2,
       retryAttempts: 1,
       runBuildValidation: false,
+      useVisionBlueprint: false,
+      prewarmPreviewRuntime: false,
+      completionTimeoutMs: 120000,
+      structuredSpecTimeoutMs: DEFAULT_STRUCTURED_SPEC_TIMEOUT_MS,
     };
   }
 
   if (capability === "low") {
     return {
       name: "low",
-      contextWindowSize: 1536,
-      maxCompletionTokens: 128,
+      contextWindowSize: 1280,
+      maxCompletionTokens: 160,
       temperature: 0.2,
       retryAttempts: 1,
       runBuildValidation: false,
+      useVisionBlueprint: false,
+      prewarmPreviewRuntime: false,
+      completionTimeoutMs: 120000,
+      structuredSpecTimeoutMs: DEFAULT_STRUCTURED_SPEC_TIMEOUT_MS,
     };
   }
 
@@ -1278,10 +1402,14 @@ function buildInferenceProfile(
     return {
       name: "high",
       contextWindowSize: 3072,
-      maxCompletionTokens: 448,
+      maxCompletionTokens: 512,
       temperature: 0.45,
       retryAttempts: 1,
       runBuildValidation: false,
+      useVisionBlueprint: true,
+      prewarmPreviewRuntime: true,
+      completionTimeoutMs: DEFAULT_LLM_COMPLETION_TIMEOUT_MS,
+      structuredSpecTimeoutMs: DEFAULT_STRUCTURED_SPEC_TIMEOUT_MS,
     };
   }
 
@@ -1292,6 +1420,10 @@ function buildInferenceProfile(
     temperature: 0.35,
     retryAttempts: 1,
     runBuildValidation: false,
+    useVisionBlueprint: true,
+    prewarmPreviewRuntime: true,
+    completionTimeoutMs: DEFAULT_LLM_COMPLETION_TIMEOUT_MS,
+    structuredSpecTimeoutMs: DEFAULT_STRUCTURED_SPEC_TIMEOUT_MS,
   };
 }
 

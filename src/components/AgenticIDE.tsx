@@ -51,6 +51,12 @@ interface SwarmActivityLog {
   message: string;
 }
 
+function isLowEndRuntime(): boolean {
+  const cores = navigator.hardwareConcurrency || 2;
+  const memory = (navigator as { deviceMemory?: number }).deviceMemory || 4;
+  return cores <= 4 || memory <= 4;
+}
+
 function sanitizeDistributedWorkerCode(code: string): string {
   const withoutFences = code
     .replace(/```(?:jsx|tsx|js|ts)?/gi, "")
@@ -115,6 +121,7 @@ export const AgenticIDE: React.FC = () => {
   const [focusRequest, setFocusRequest] = useState<number>(0);
 
   const [isLogsExpanded, setIsLogsExpanded] = useState(false);
+  const lowEndMode = useMemo(() => isLowEndRuntime(), []);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
@@ -437,14 +444,26 @@ export const AgenticIDE: React.FC = () => {
       if (attachedImageDataUrl) {
         setIsAnalyzingImage(true);
         try {
-          const converted = await dataUrlToImageBytes(attachedImageDataUrl);
-          imageBytes = converted.bytes;
-          imageMimeType = converted.mimeType;
-          imageDescription = await extractUIFromImage(attachedImageDataUrl);
-          appendSwarmLog("[Swarm] Master: Packed image into raw pixel buffer.");
-          appendWorkerTerminalLine(
-            `Packed ${converted.bytes.byteLength} image bytes for worker inference.`,
-          );
+          if (lowEndMode) {
+            imageDescription = [
+              "Low-end mode is active; heavy image analysis has been skipped for performance.",
+              "Use the attached user prompt as the primary source of truth and produce a faithful modern UI recreation.",
+            ].join("\n");
+            appendWorkerTerminalLine(
+              "Low-end mode: skipped local vision extraction to reduce CPU/GPU pressure.",
+            );
+          } else {
+            const converted = await dataUrlToImageBytes(attachedImageDataUrl);
+            imageBytes = converted.bytes;
+            imageMimeType = converted.mimeType;
+            imageDescription = await extractUIFromImage(attachedImageDataUrl);
+            appendSwarmLog(
+              "[Swarm] Master: Packed image into raw pixel buffer.",
+            );
+            appendWorkerTerminalLine(
+              `Packed ${converted.bytes.byteLength} image bytes for worker inference.`,
+            );
+          }
         } catch (error) {
           const message =
             error instanceof Error
@@ -803,7 +822,13 @@ export const AgenticIDE: React.FC = () => {
 
         let layoutDescription = payload.imageDescription?.trim() || "";
 
-        if (!layoutDescription && payload.imageBytes) {
+        if (lowEndMode && !layoutDescription) {
+          sendStatus(
+            "Low-end mode active: skipping heavy local image analysis and using prompt-first reconstruction.",
+          );
+        }
+
+        if (!lowEndMode && !layoutDescription && payload.imageBytes) {
           sendStatus("Analyzing raw image pixels on worker...");
           try {
             const reconstructed = await imageBytesToDataUrl(
@@ -823,7 +848,7 @@ export const AgenticIDE: React.FC = () => {
           }
         }
 
-        if (!layoutDescription && payload.imageBase64) {
+        if (!lowEndMode && !layoutDescription && payload.imageBase64) {
           sendStatus("Analyzing image reference...");
           try {
             layoutDescription = await extractUIFromImage(payload.imageBase64);
@@ -1004,6 +1029,7 @@ export const AgenticIDE: React.FC = () => {
     engine,
     executeGeneratedCodeDirectly,
     imageBytesToDataUrl,
+    lowEndMode,
     swarmManager,
   ]);
 

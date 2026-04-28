@@ -3,7 +3,8 @@ import Peer, { DataConnection } from "peerjs";
 
 const DEFAULT_PEER_SIGNAL_PORT = 9000;
 const DEFAULT_PEER_SIGNAL_PATH = "/peerjs";
-const PEER_INIT_TIMEOUT_MS = 12000;
+const PEER_INIT_TIMEOUT_MS = 30000;
+const PEER_INIT_MAX_RETRIES = 2;
 
 type LocalSignalingConfig = {
   host: string;
@@ -165,6 +166,7 @@ export const useSwarm = () => {
   const [initError, setInitError] = useState<string | null>(null);
   const [isMasterHeartbeatHealthy, setIsMasterHeartbeatHealthy] =
     useState<boolean>(true);
+  const [peerBootstrapNonce, setPeerBootstrapNonce] = useState(0);
 
   const peerRef = useRef<Peer | null>(null);
   const dataHandlerRef = useRef<
@@ -175,6 +177,7 @@ export const useSwarm = () => {
   const lastPingRef = useRef<number>(Date.now());
   const masterLostNotifiedRef = useRef(false);
   const isMasterRef = useRef(false);
+  const peerInitRetryCountRef = useRef(0);
 
   useEffect(() => {
     isMasterRef.current = isMaster;
@@ -279,6 +282,8 @@ export const useSwarm = () => {
             initTimeoutId = null;
           }
 
+          peerInitRetryCountRef.current = 0;
+
           console.log("[Swarm] Peer initialized with ID:", id);
           setPeerId(id);
           setIsInitialized(true);
@@ -323,6 +328,26 @@ export const useSwarm = () => {
             return;
           }
 
+          const retryCount = peerInitRetryCountRef.current;
+
+          if (retryCount < PEER_INIT_MAX_RETRIES) {
+            peerInitRetryCountRef.current = retryCount + 1;
+            setInitError(
+              `PeerJS initialization is slow (attempt ${retryCount + 1}/${PEER_INIT_MAX_RETRIES + 1}). Retrying...`,
+            );
+
+            if (!peer.destroyed) {
+              peer.destroy();
+            }
+
+            peerRef.current = null;
+            setConnectionStatus("initializing");
+            window.setTimeout(() => {
+              setPeerBootstrapNonce((prev) => prev + 1);
+            }, 800);
+            return;
+          }
+
           setIsInitialized(false);
           setConnectionStatus("error");
           setInitError(
@@ -363,7 +388,7 @@ export const useSwarm = () => {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [peerBootstrapNonce]);
 
   /**
    * Setup event listeners for a connection
