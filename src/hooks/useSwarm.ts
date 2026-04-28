@@ -122,6 +122,7 @@ export interface SwarmTaskPayload {
   codeChunk?: string;
   chunkIndex?: number;
   sessionId?: string;
+  skipBlueprint?: boolean;
 }
 
 type SwarmMessageEnvelope = {

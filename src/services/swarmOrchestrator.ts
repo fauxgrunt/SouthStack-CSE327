@@ -55,6 +55,36 @@ function isWorkerPreloadFailure(error: unknown): boolean {
   );
 }
 
+function buildPromptFirstBlueprint(taskPayload: SwarmTaskPayload): string {
+  const summary = taskPayload.instructions
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 240);
+
+  return JSON.stringify(
+    {
+      version: "1.0",
+      title: "Low-end prompt-first blueprint",
+      subtitle:
+        "Recreate the visible UI faithfully using the task instructions and shared context.",
+      sections: [
+        {
+          id: "primary",
+          type: "hero",
+          heading: "Match the screenshot composition",
+          body: "Preserve spacing, alignment, card geometry, colors, and footer placement from the provided reference.",
+          items: [summary],
+        },
+      ],
+      cta: {
+        label: taskPayload.sharedContext?.trim() ? "Build UI" : "Next",
+      },
+    },
+    null,
+    2,
+  );
+}
+
 async function createCompletionWithWorkerGuard<T>(
   promiseFactory: () => Promise<T>,
   label: string,
@@ -738,59 +768,68 @@ export async function executeWorkerTaskWithStreaming(
   emitLog("AI Engine active. Allocating GPU memory...");
   emitLog("Extracting Vision Blueprint...");
 
-  let blueprintCompletion: Awaited<
-    ReturnType<typeof engine.chat.completions.create>
-  > | null = null;
-  try {
-    blueprintCompletion = await createCompletionWithWorkerGuard(
-      () =>
-        engine.chat.completions.create({
-          messages: [
-            {
-              role: "system" as const,
-              content: VISION_BLUEPRINT_PROMPT,
-            },
-            {
-              role: "user" as const,
-              content: `File: ${taskPayload.fileName}\n\nInstructions: ${taskPayload.instructions}\n\nCreate the blueprint JSON now.`,
-            },
-          ],
-          temperature: 0.1,
-          max_tokens: 640,
-        }),
-      `Worker blueprint ${taskPayload.taskId}`,
-      BLUEPRINT_STAGE_TIMEOUT_MS,
-    );
+  let uiBlueprint = "{}";
 
-    if (!blueprintCompletion) {
-      emitLog(
-        "Worker blueprint initialization failed or timed out; continuing with empty blueprint.",
+  if (taskPayload.skipBlueprint) {
+    emitLog(
+      "Low-end mode active; skipping the 3B blueprint stage and using a prompt-first blueprint shell.",
+    );
+    uiBlueprint = buildPromptFirstBlueprint(taskPayload);
+  } else {
+    let blueprintCompletion: Awaited<
+      ReturnType<typeof engine.chat.completions.create>
+    > | null = null;
+    try {
+      blueprintCompletion = await createCompletionWithWorkerGuard(
+        () =>
+          engine.chat.completions.create({
+            messages: [
+              {
+                role: "system" as const,
+                content: VISION_BLUEPRINT_PROMPT,
+              },
+              {
+                role: "user" as const,
+                content: `File: ${taskPayload.fileName}\n\nInstructions: ${taskPayload.instructions}\n\nCreate the blueprint JSON now.`,
+              },
+            ],
+            temperature: 0.1,
+            max_tokens: 640,
+          }),
+        `Worker blueprint ${taskPayload.taskId}`,
+        BLUEPRINT_STAGE_TIMEOUT_MS,
+      );
+
+      if (!blueprintCompletion) {
+        emitLog(
+          "Worker blueprint initialization failed or timed out; continuing with empty blueprint.",
+        );
+      }
+    } catch (error) {
+      const message = normalizeWorkerModelError(
+        error,
+        "Worker vision blueprint generation failed",
+        STRICT_MODEL_LOAD_ERRORS.blueprint,
+      );
+      emitLog(message);
+      console.error(
+        "[Worker:Stream] Blueprint error, continuing with empty blueprint:",
+        error,
       );
     }
-  } catch (error) {
-    const message = normalizeWorkerModelError(
-      error,
-      "Worker vision blueprint generation failed",
-      STRICT_MODEL_LOAD_ERRORS.blueprint,
+
+    const parsedBlueprint = parseVisionBlueprint(
+      blueprintCompletion?.choices[0]?.message?.content || "",
     );
-    emitLog(message);
-    console.error(
-      "[Worker:Stream] Blueprint error, continuing with empty blueprint:",
-      error,
-    );
+
+    if (!parsedBlueprint) {
+      emitLog(
+        "Vision blueprint parse failed; continuing with an empty blueprint shell.",
+      );
+    }
+
+    uiBlueprint = parsedBlueprint || "{}";
   }
-
-  const parsedBlueprint = parseVisionBlueprint(
-    blueprintCompletion?.choices[0]?.message?.content || "",
-  );
-
-  if (!parsedBlueprint) {
-    emitLog(
-      "Vision blueprint parse failed; continuing with an empty blueprint shell.",
-    );
-  }
-
-  const uiBlueprint = parsedBlueprint || "{}";
 
   emitLog("Vision blueprint extracted successfully.");
   emitLog("Loading 7B coder stage...");

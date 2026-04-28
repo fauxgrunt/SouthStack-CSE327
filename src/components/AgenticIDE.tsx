@@ -902,6 +902,7 @@ export const AgenticIDE: React.FC = () => {
           type: "TASK_ASSIGN",
           taskId: payload.taskId,
           fileName: "src/App.jsx",
+          skipBlueprint: lowEndMode,
           instructions: [
             payload.prompt.trim(),
             "",
