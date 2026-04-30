@@ -317,39 +317,11 @@ REQUIREMENTS:
  *
  * This prompt instructs worker nodes to execute the final React coding stage.
  */
-export const WORKER_PROMPT = `You are the 7B React coder stage in a strict two-stage offline pipeline.
-Your task is to generate a fully functional, interactive React UI from the provided blueprint.
-
-CRITICAL SYSTEM CONSTRAINTS:
-1. ZERO EXTERNAL LIBRARIES: You are forbidden from importing react-draggable, tailwind-ui, lucide-react, or ANY other third-party NPM package.
-2. ALLOWED IMPORTS: You may ONLY import from 'react' (for example, import React, { useState } from 'react';).
-3. STYLING: You MUST use standard Tailwind CSS utility classes directly in the className attribute. Do not use wrapper functions.
-
-SIZING AND LAYOUT CONSTRAINTS (CRITICAL):
-- SVG elements MUST have explicit viewBox values with coordinates between 0-256 or 0-512, NOT unbounded large values.
-- SVG stroke-width MUST NOT exceed 2. Use stroke-width="1" or stroke-width="2" only.
-- All SVG and img elements MUST be wrapped in a container with a fixed width/height (e.g., className="w-16 h-16" or className="w-24 h-24").
-- Icon sizes: Use w-6 h-6, w-8 h-8, or w-12 h-12 only. Never create oversized icons.
-- Card widths: Use Tailwind max-width utilities (max-w-sm, max-w-md, max-w-lg). Never let cards/containers exceed max-w-2xl.
-- Button and form input sizes: Use standard py-2 px-4 or py-3 px-6. Never create oversized buttons.
-- NEVER generate SVG paths with unbounded coordinates or huge stroke widths that create massive black shapes.
-
-INTERACTIVITY REQUIREMENTS (MUST IMPLEMENT):
-4. FREE-FLOATING DRAG: You must make the main UI container movable with React state and pointer events.
-  - Use const [pos, setPos] = useState({ x: 0, y: 0 }).
-  - Attach onPointerDown, onPointerMove, and onPointerUp to the wrapper.
-  - Apply style={{ position: 'absolute', left: pos.x, top: pos.y }} to the draggable shell.
-5. INLINE EDITING: Every text node (h1, h2, p, span, button labels) MUST include the attributes contentEditable={true} and suppressContentEditableWarning={true} so the user can type directly into the preview.
-
-DRAG HANDLE REQUIREMENT:
-You must wrap the entire generated component in a draggable container using standard React state (x, y) and pointer events so the user can drag the UI around the Canvas.
-
-PERFORMANCE REQUIREMENT:
-Keep the implementation compact and avoid unnecessary abstraction so the 7B stage can finish faster.
-
-PIPELINE EXECUTION:
-Use the uiBlueprint as the source of truth. Recreate the layout faithfully and preserve the original composition, spacing, alignment, color mood, and typography as closely as possible.
-Prefer a compact single-screen implementation when the source is a centered form or login page. Use a contemporary polished visual style: clean sans-serif typography, soft shadows, rounded corners, refined spacing, and subtle gradients when appropriate. Avoid dated HTML styling, Times New Roman/serif defaults, or 1990s-looking layouts. Output ONLY the raw, complete, functional React code containing export default function App(). Do not include explanations or markdown outside the code block.`;
+export const WORKER_PROMPT = `You are a React code generator. Your ONLY goal is pixel-perfect visual fidelity.
+Replicate the colors, layout, text, spacing, and visual hierarchy from the provided UI BLUEPRINT exactly using standard Tailwind CSS.
+Generate one clean, static React component with export default function App().
+Use only React imports. Do not add third-party packages.
+Output ONLY raw JSX code with no explanations.`;
 
 const VISION_BLUEPRINT_PROMPT = `You are the 3B vision blueprint stage in the SouthStack worker pipeline.
 Return exactly one JSON object and nothing else.
@@ -802,7 +774,10 @@ export async function executeWorkerTaskWithStreaming(
                 content: `File: ${taskPayload.fileName}\n\nInstructions: ${taskPayload.instructions}\n\nCreate the blueprint JSON now.`,
               },
             ],
-            temperature: 0.1,
+            temperature: 0.05,
+            top_p: 0.95,
+            repetition_penalty: 1.15,
+            frequency_penalty: 0.1,
             max_tokens: 640,
           }),
         `Worker blueprint ${taskPayload.taskId}`,
@@ -874,12 +849,7 @@ export async function executeWorkerTaskWithStreaming(
     return "";
   }
 
-  const systemPrompt = `${buildWorkerPromptWithContext(taskPayload.sharedContext)}
-
-UI BLUEPRINT:
-${uiBlueprint}
-
-Use the blueprint as the source of truth and output only runnable React code.`;
+  const systemPrompt = buildWorkerPromptWithContext(taskPayload.sharedContext);
   const messages = [
     {
       role: "system" as const,
@@ -887,7 +857,7 @@ Use the blueprint as the source of truth and output only runnable React code.`;
     },
     {
       role: "user" as const,
-      content: `File: ${taskPayload.fileName}\n\nInstructions: ${taskPayload.instructions}\n\nGenerate the complete code for this file:`,
+      content: `UI BLUEPRINT:\n${uiBlueprint}\n\nFile: ${taskPayload.fileName}\n\nInstructions: ${taskPayload.instructions}\n\nGenerate the complete code for this file:`,
     },
   ];
 
@@ -897,7 +867,10 @@ Use the blueprint as the source of truth and output only runnable React code.`;
       () =>
         engine.chat.completions.create({
           messages,
-          temperature: 0.2,
+          temperature: 0.05,
+          top_p: 0.95,
+          repetition_penalty: 1.15,
+          frequency_penalty: 0.1,
           max_tokens: 900,
           stream: true,
         }),

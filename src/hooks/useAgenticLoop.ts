@@ -802,7 +802,10 @@ Rules:
                     { role: "system", content: visionSystemPrompt },
                     { role: "user", content: visionWindow.userPrompt },
                   ],
-                  temperature: 0.15,
+                  temperature: 0.05,
+                  top_p: 0.95,
+                  repetition_penalty: 1.15,
+                  frequency_penalty: 0.1,
                   max_tokens: Math.min(768, profile.maxCompletionTokens),
                 }),
                 profile.structuredSpecTimeoutMs,
@@ -873,7 +876,10 @@ Rules:
                     { role: "system", content: coderSystemPrompt },
                     { role: "user", content: coderWindow.userPrompt },
                   ],
-                  temperature: profile.temperature,
+                  temperature: 0.05,
+                  top_p: 0.95,
+                  repetition_penalty: 1.15,
+                  frequency_penalty: 0.1,
                   max_tokens: profile.maxCompletionTokens,
                 }),
                 profile.completionTimeoutMs,
@@ -922,7 +928,10 @@ Rules:
                     { role: "system", content: systemPrompt },
                     { role: "user", content: coderWindow.userPrompt },
                   ],
-                  temperature: profile.temperature,
+                  temperature: 0.05,
+                  top_p: 0.95,
+                  repetition_penalty: 1.15,
+                  frequency_penalty: 0.1,
                   max_tokens: profile.maxCompletionTokens,
                 }),
                 profile.completionTimeoutMs,
@@ -973,7 +982,10 @@ Rules:
                     { role: "system", content: systemPrompt },
                     { role: "user", content: coderWindow.userPrompt },
                   ],
-                  temperature: profile.temperature,
+                  temperature: 0.05,
+                  top_p: 0.95,
+                  repetition_penalty: 1.15,
+                  frequency_penalty: 0.1,
                   max_tokens: profile.maxCompletionTokens,
                 }),
                 profile.completionTimeoutMs,
@@ -1717,7 +1729,7 @@ Guidelines:
   }
 
   if (modelType === "7B") {
-    prompt += `\n\nIMPORTANT: This is the coder stage. Output one runnable React component only, with faithful image alignment, editable text, and a modern single-file React layout. Ban primitive unstyled div layouts. Use inline Tailwind CSS with a contemporary polished design: clean sans-serif typography, refined spacing, a rounded shadowed card, subtle gradients, and absolute positioning inside the card. CRITICAL: Do NOT use HTML5 drag-and-drop. You MUST make the main container a free-floating draggable element. Use standard React state const [pos, setPos] = useState({x: 0, y: 0}). Attach onPointerDown, onPointerMove, and onPointerUp to the wrapper div to track mouse movement, and apply style={{ position: 'absolute', left: pos.x, top: pos.y }}. CRITICAL HARDWARE LIMIT: You are running on edge hardware with limited VRAM. You MUST keep your code extremely concise. Do NOT add unnecessary wrapper divs. Do NOT write comments. Output ONLY the raw, perfectly formatted JSX code. Do not hallucinate massive arrays. Ensure perfect syntax. Do not drop letters in standard attributes (use className, default, button). Close all tags perfectly. Avoid dated HTML styling, default browser controls, and 1990s aesthetics.`;
+    prompt += `\n\nThis is the React code generation stage. Output one runnable component only. Use only React imports. Use Tailwind CSS. No third-party packages.`;
   }
 
   if (ragContext && ragContext.length > 0) {
