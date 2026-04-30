@@ -143,7 +143,7 @@ export function useUIBuilder(
 
         await webContainerService.writeFile(
           "/src/styles.css",
-          `@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\nhtml, body, #root {\n  width: 100%;\n  height: 100%;\n  margin: 0;\n}\n\nbody {\n  font-family: Segoe UI, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;\n  background: #020617;\n}\n`,
+          `@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\nhtml, body, #root {\n  width: 100%;\n  height: 100%;\n  margin: 0;\n}\n\nbody {\n  font-family: Segoe UI, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;\n  background: #020617;\n}\n\n/* Prevent oversized SVGs/images from overflowing the preview */\nsvg, img {\n  max-width: 100%;\n  height: auto;\n  display: block;\n}\n\n/* Normalize basic form control appearance in the preview */\ninput, button, textarea, select {\n  font-family: inherit;\n  box-sizing: border-box;\n}\n`,
         );
 
         await webContainerService.writeFile(

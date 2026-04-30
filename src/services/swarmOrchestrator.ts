@@ -325,6 +325,15 @@ CRITICAL SYSTEM CONSTRAINTS:
 2. ALLOWED IMPORTS: You may ONLY import from 'react' (for example, import React, { useState } from 'react';).
 3. STYLING: You MUST use standard Tailwind CSS utility classes directly in the className attribute. Do not use wrapper functions.
 
+SIZING AND LAYOUT CONSTRAINTS (CRITICAL):
+- SVG elements MUST have explicit viewBox values with coordinates between 0-256 or 0-512, NOT unbounded large values.
+- SVG stroke-width MUST NOT exceed 2. Use stroke-width="1" or stroke-width="2" only.
+- All SVG and img elements MUST be wrapped in a container with a fixed width/height (e.g., className="w-16 h-16" or className="w-24 h-24").
+- Icon sizes: Use w-6 h-6, w-8 h-8, or w-12 h-12 only. Never create oversized icons.
+- Card widths: Use Tailwind max-width utilities (max-w-sm, max-w-md, max-w-lg). Never let cards/containers exceed max-w-2xl.
+- Button and form input sizes: Use standard py-2 px-4 or py-3 px-6. Never create oversized buttons.
+- NEVER generate SVG paths with unbounded coordinates or huge stroke widths that create massive black shapes.
+
 INTERACTIVITY REQUIREMENTS (MUST IMPLEMENT):
 4. FREE-FLOATING DRAG: You must make the main UI container movable with React state and pointer events.
   - Use const [pos, setPos] = useState({ x: 0, y: 0 }).
