@@ -477,11 +477,11 @@ export const STRICT_MODEL_REGISTRY = Object.freeze({
     specialization: "code",
   }),
   REACT_CODER: Object.freeze({
-    id: "Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC",
-    name: "Qwen 2.5 Coder 7B React Architect",
-    size: "7.0GB",
-    vramRequired: 8,
-    contextWindow: 4096,
+    id: "Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC",
+    name: "Qwen 2.5 Coder 3B React Architect (downgrade)",
+    size: "3.2GB",
+    vramRequired: 4,
+    contextWindow: 3072,
     specialization: "code",
   }),
 });
@@ -492,7 +492,7 @@ export const MODEL_PRESETS: ModelConfig[] = [
 ];
 
 export const DEFAULT_INFERENCE_OPTIONS: InferenceOptions = {
-  temperature: 0.7,
+  temperature: 0.05,
   top_p: 0.95,
   max_tokens: 1024,
   presence_penalty: 0,

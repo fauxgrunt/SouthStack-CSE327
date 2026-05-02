@@ -154,9 +154,9 @@ const App: React.FC = () => {
         addLog(report.text, "info");
       });
 
-      addLog("Loading Qwen 2.5 Coder 7B model...", "info");
-      await engine.reload("Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC", {
-        context_window_size: 4096,
+      addLog("Loading Qwen 2.5 Coder 3B model (demo downgrade)...", "info");
+      await engine.reload("Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC", {
+        context_window_size: 3072,
       });
       addLog("[OK] WebLLM ready!", "success");
 

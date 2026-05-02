@@ -143,7 +143,7 @@ export function useUIBuilder(
 
         await webContainerService.writeFile(
           "/src/styles.css",
-          `@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\nhtml, body, #root {\n  width: 100%;\n  height: 100%;\n  margin: 0;\n}\n\nbody {\n  font-family: Segoe UI, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;\n  background: #020617;\n}\n\n/* Prevent oversized SVGs/images from overflowing the preview */\nsvg, img {\n  max-width: 100%;\n  height: auto;\n  display: block;\n}\n\n/* Normalize basic form control appearance in the preview */\ninput, button, textarea, select {\n  font-family: inherit;\n  box-sizing: border-box;\n}\n`,
+          `@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\nhtml, body, #root {\n  width: 100%;\n  height: 100%;\n  margin: 0;\n}\n\nbody {\n  font-family: Segoe UI, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;\n  background: #020617;\n}\n\n@keyframes fadeIn {\n  from {\n    opacity: 0;\n    transform: translateY(12px);\n  }\n\n  to {\n    opacity: 1;\n    transform: translateY(0);\n  }\n}\n\n@keyframes pulseSlow {\n  0%,\n  100% {\n    opacity: 1;\n  }\n\n  50% {\n    opacity: 0.5;\n  }\n}\n\n.animate-fadeIn {\n  animation: fadeIn 0.7s ease-out both;\n}\n\n.animate-pulse-slow {\n  animation: pulseSlow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;\n}\n\n.animation-delay-2000 {\n  animation-delay: 2s;\n}\n\n/* Prevent oversized SVGs/images from overflowing the preview */\nsvg, img {\n  max-width: 100%;\n  height: auto;\n  display: block;\n}\n\n/* Normalize basic form control appearance in the preview */\ninput, button, textarea, select {\n  font-family: inherit;\n  box-sizing: border-box;\n}\n`,
         );
 
         await webContainerService.writeFile(

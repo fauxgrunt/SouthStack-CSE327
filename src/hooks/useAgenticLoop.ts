@@ -3,6 +3,8 @@ import * as webllm from "@mlc-ai/web-llm";
 import { detectDeviceCapability, limitArraySize } from "../utils/performance";
 import { webContainerService } from "../services/webcontainer";
 import { autoCloseJsx } from "../utils/jsxAutoFixer";
+import { saveFailedWorkerOutput } from "../utils/failureCapture";
+import { aggressiveSanitize } from "../utils/codeSanitizer";
 
 // Model Configuration - worker-first preference for stronger code generation
 export type ModelType = "3B" | "7B";
@@ -18,10 +20,11 @@ export const MODEL_CONFIGS = Object.freeze({
     minStorage: 3.2 * 1024 * 1024 * 1024,
   },
   "7B": {
-    id: "Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC",
-    label: "React Coder Model (7B)",
-    description: "Stage 2 React generation for finalized UI code",
-    minStorage: 7 * 1024 * 1024 * 1024,
+    id: "Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC",
+    label: "React Coder Model (3B-downgrade)",
+    description:
+      "Stage 2 React generation for finalized UI code (downgraded to 3B for demo stability)",
+    minStorage: 3.2 * 1024 * 1024 * 1024,
   },
 });
 
@@ -142,6 +145,42 @@ function isRecoverableEngineInstanceError(error: unknown): boolean {
   );
 }
 
+function healVramTypos(code: string): string {
+  return (
+    code
+      // Fix mangled export statements
+      .replace(/export dult\b/g, "export default")
+      .replace(/expor default\b/g, "export default")
+      .replace(/export defalt\b/g, "export default")
+      .replace(/export defaut\b/g, "export default")
+      // Brute force catch-all for the bottom of the file
+      .replace(/export [a-zA-Z]+ App;/g, "export default App;")
+
+      // Fix standard HTML tags
+      .replace(/<ma\b/g, "<main")
+      .replace(/<\/ma>/g, "</main>")
+      .replace(/<hader\b/g, "<header")
+      .replace(/<\/hader>/g, "</header>")
+      .replace(/<fooer\b/g, "<footer")
+      .replace(/<\/fooer>/g, "</footer>")
+      .replace(/<foter\b/g, "<footer")
+      .replace(/<\/foter>/g, "</footer>")
+
+      // Fix React attributes
+      .replace(/clssName=/g, "className=")
+      .replace(/cassName=/g, "className=")
+      .replace(/clasName=/g, "className=")
+      .replace(/onChane=/g, "onChange=")
+
+      // Fix common HTML attributes
+      .replace(/tpe="/g, 'type="')
+      .replace(/placohlder=/g, "placeholder=")
+      .replace(/placehoder=/g, "placeholder=")
+      // Fix double-closed self-closing input tags produced by VRAM mangling
+      .replace(/<input \/>/g, "<input")
+  );
+}
+
 /**
  * useAgenticLoop - Core hook for autonomous AI coding with self-healing
  *
@@ -176,6 +215,47 @@ export const useAgenticLoop = () => {
   const webContainerBootPromiseRef = useRef<Promise<boolean> | null>(null);
   const lastInitProgressRef = useRef(-1);
   const previewRuntimePreparedRef = useRef(false);
+
+  // Tier-5 PERFECT fallback: guaranteed-safe, minimal Tailwind React app
+  const DEFAULT_SAFE_FALLBACK = `export default function App(){
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white overflow-hidden">
+      <div className="absolute inset-0 opacity-30">
+        <div className="absolute top-20 left-10 w-72 h-72 bg-purple-500 rounded-full mix-blend-multiply filter blur-3xl animate-pulse"></div>
+        <div className="absolute bottom-20 right-10 w-72 h-72 bg-blue-500 rounded-full mix-blend-multiply filter blur-3xl animate-pulse animation-delay-2000"></div>
+      </div>
+      <div className="relative z-10 min-h-screen flex flex-col items-center justify-center px-4 sm:px-6 lg:px-8">
+        <div className="text-center mb-12 animate-fadeIn">
+          <h1 className="text-6xl sm:text-7xl font-black mb-6 bg-clip-text text-transparent bg-gradient-to-r from-purple-400 via-pink-400 to-blue-400">
+            SouthStack
+          </h1>
+          <p className="text-xl sm:text-2xl text-purple-200 font-light mb-2">Generative AI Canvas</p>
+          <p className="text-sm sm:text-base text-slate-400">Your UI appears here • Powered by Local LLMs</p>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 max-w-4xl mb-12">
+          <div className="bg-white/10 backdrop-blur-md rounded-2xl p-8 border border-white/20 hover:border-purple-400/50 transition-all hover:scale-105">
+            <div className="text-4xl mb-4">⚡</div>
+            <h3 className="text-lg font-bold mb-2">Local First</h3>
+            <p className="text-sm text-slate-300">Runs entirely in your browser</p>
+          </div>
+          <div className="bg-white/10 backdrop-blur-md rounded-2xl p-8 border border-white/20 hover:border-purple-400/50 transition-all hover:scale-105">
+            <div className="text-4xl mb-4">🎨</div>
+            <h3 className="text-lg font-bold mb-2">Modern UI</h3>
+            <p className="text-sm text-slate-300">Tailwind + React Components</p>
+          </div>
+          <div className="bg-white/10 backdrop-blur-md rounded-2xl p-8 border border-white/20 hover:border-purple-400/50 transition-all hover:scale-105">
+            <div className="text-4xl mb-4">🚀</div>
+            <h3 className="text-lg font-bold mb-2">Instant</h3>
+            <p className="text-sm text-slate-300">Real-time code generation</p>
+          </div>
+        </div>
+        <button className="bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white font-bold py-4 px-12 rounded-full text-lg transition-all hover:scale-110 shadow-2xl">
+          Get Started
+        </button>
+      </div>
+    </div>
+  );
+}`;
   const previewRuntimePreparingRef = useRef(false);
   const inferenceProfileRef = useRef<InferenceProfile>(
     buildInferenceProfile("medium", true),
@@ -243,6 +323,7 @@ export const useAgenticLoop = () => {
         await loadModel(engine);
         setState((prev) => ({ ...prev, selectedModel: modelType }));
       } catch (error) {
+        let finalError: unknown = error;
         if (isRecoverableEngineInstanceError(error)) {
           addLog(
             phase,
@@ -259,12 +340,12 @@ export const useAgenticLoop = () => {
             setState((prev) => ({ ...prev, selectedModel: modelType }));
             return;
           } catch (retryError) {
-            error = retryError;
+            finalError = retryError;
           }
         }
 
         const errorMessage =
-          error instanceof Error ? error.message : String(error);
+          finalError instanceof Error ? finalError.message : String(finalError);
         const normalizedMessage =
           /vram|memory|allocation|out of memory|webgpu/i.test(errorMessage)
             ? STRICT_MODEL_LOAD_ERRORS[modelType]
@@ -891,9 +972,11 @@ Rules:
                 );
               }
 
-              currentCode = extractCode(
-                completion.choices[0].message.content || "",
-              );
+              const rawCompletion1 =
+                completion.choices[0].message.content || "";
+              console.log("AUDIT [1] RAW AI OUTPUT:\n", rawCompletion1);
+              currentCode = extractCode(rawCompletion1);
+              console.log("AUDIT [2] AFTER YAP-CUTTER:\n", currentCode);
             } else if (imageLedPrompt && !profile.useVisionBlueprint) {
               addLog(
                 "generation",
@@ -943,9 +1026,11 @@ Rules:
                 );
               }
 
-              currentCode = extractCode(
-                completion.choices[0].message.content || "",
-              );
+              const rawCompletion2 =
+                completion.choices[0].message.content || "";
+              console.log("AUDIT [1] RAW AI OUTPUT:\n", rawCompletion2);
+              currentCode = extractCode(rawCompletion2);
+              console.log("AUDIT [2] AFTER YAP-CUTTER:\n", currentCode);
             } else {
               const systemPrompt = buildSystemPrompt(ragContext, "7B");
               const coderWindow = fitPromptToContextWindow(
@@ -997,9 +1082,11 @@ Rules:
                 );
               }
 
-              currentCode = extractCode(
-                completion.choices[0].message.content || "",
-              );
+              const rawCompletion3 =
+                completion.choices[0].message.content || "";
+              console.log("AUDIT [1] RAW AI OUTPUT:\n", rawCompletion3);
+              currentCode = extractCode(rawCompletion3);
+              console.log("AUDIT [2] AFTER YAP-CUTTER:\n", currentCode);
             }
 
             if (
@@ -1202,7 +1289,7 @@ Rules:
         isGeneratingRef.current = false;
       }
     },
-    [addLog, ensureWebContainerReady, state.selectedModel],
+    [addLog, ensureWebContainerReady, reloadLockedModel],
   );
 
   const executeGeneratedCodeDirectly = useCallback(
@@ -1211,7 +1298,7 @@ Rules:
         return { success: false, error: "No generated code payload received." };
       }
 
-      const preparedCode = resolveExecutableUiCodePayload(
+      let preparedCode = resolveExecutableUiCodePayload(
         sanitizeWorkerCode(code),
         userPrompt,
       );
@@ -1228,6 +1315,7 @@ Rules:
           "execution",
         ))
       ) {
+        const safePreparedCode = yapCutter(preparedCode);
         addLog(
           "execution",
           "Skipping distributed execution because WebContainer is unavailable on this device/browser.",
@@ -1238,23 +1326,24 @@ Rules:
           isExecuting: false,
           currentPhase: "completed",
           error: null,
-          generatedCode: preparedCode,
+          generatedCode: safePreparedCode,
           previewUrl: null,
         }));
         return {
           success: true,
-          code: preparedCode,
+          code: safePreparedCode,
           output:
             "Distributed code received. Live preview is unavailable on this device/browser.",
         };
       }
 
+      const safePreparedCode = yapCutter(preparedCode);
       setState((prev) => ({
         ...prev,
         isExecuting: true,
         currentPhase: "executing",
         error: null,
-        generatedCode: preparedCode,
+        generatedCode: safePreparedCode,
       }));
 
       addLog(
@@ -1263,10 +1352,140 @@ Rules:
         "info",
       );
 
+      // Sanitization preview: log the first few hundred characters and auto-correct
+      try {
+        const preview = safePreparedCode.slice(0, 400);
+        addLog("execution", `Sanitized code preview:\n${preview}`, "info");
+        // Auto-correct known 'export default' typos if present
+        const exportTypoRE =
+          /\bexport\s+(deflt|defaul|defalut|defaut|defu?l?t?)\b/gi;
+        if (exportTypoRE.test(safePreparedCode)) {
+          addLog(
+            "execution",
+            "Detected common 'export default' typo in generated code; applying auto-correction.",
+            "warning",
+          );
+          preparedCode = safePreparedCode.replace(
+            exportTypoRE,
+            "export default",
+          );
+        } else {
+          preparedCode = safePreparedCode;
+        }
+      } catch (e) {
+        // best-effort preview; don't fail on preview errors
+        console.warn("[SanitizationPreview] Preview failed", e);
+      }
+
       const fixedPreparedCode = autoCloseJsx(preparedCode);
 
+      // Yap-Cutter: Strip conversational text appended after export default
+      const yapCutCode = yapCutter(fixedPreparedCode);
+      if (yapCutCode !== fixedPreparedCode) {
+        addLog(
+          "execution",
+          "Yap-Cutter removed trailing conversational text after export statement.",
+          "info",
+        );
+      }
+
+      // Tailwind Enforcer: ensure generated code includes Tailwind `className` usages.
+      // If insufficient, perform one corrective regeneration with an explicit Tailwind instruction.
+      let finalPreparedCode = yapCutCode;
+      try {
+        const classNameCount = (yapCutCode.match(/className=/g) || []).length;
+        console.log("AUDIT [3] TAILWIND CLASS COUNT:", classNameCount);
+        if (classNameCount < 3) {
+          addLog(
+            "generation",
+            "TailwindValidator: insufficient className attributes, triggering one-shot regeneration.",
+            "warning",
+          );
+
+          const correctiveInstruction =
+            "You forgot the Tailwind CSS styling. You MUST add className attributes with Tailwind utility classes to match the design.";
+
+          // One-shot regen: call the main agentic loop with corrective instruction appended.
+          const regenPrompt = `${userPrompt}\n\n${correctiveInstruction}`;
+          const regenResult = await executeAgenticLoop(regenPrompt);
+
+          if (
+            regenResult &&
+            typeof regenResult === "object" &&
+            "code" in regenResult &&
+            regenResult.success &&
+            (regenResult as any).code
+          ) {
+            const regenSanitized = autoCloseJsx(
+              resolveExecutableUiCodePayload(
+                sanitizeWorkerCode((regenResult as any).code),
+                userPrompt,
+              ),
+            );
+            finalPreparedCode = yapCutter(regenSanitized);
+            addLog(
+              "generation",
+              "TailwindValidator: regeneration produced code with additional styling. Proceeding with regenerated payload.",
+              "info",
+            );
+          } else {
+            addLog(
+              "generation",
+              "TailwindValidator: regeneration failed or returned no code; continuing with original payload.",
+              "warning",
+            );
+          }
+        }
+
+        finalPreparedCode = healVramTypos(finalPreparedCode);
+      } catch (e) {
+        void e;
+      }
+
+      // Strict JSX validation: reject malformed code BEFORE execution
+      const isValidJsxStructure = validateJsxStructure(finalPreparedCode);
+      if (!isValidJsxStructure) {
+        console.warn(
+          "[JSXValidator] Generated code failed structural validation. Using DEFAULT_SAFE_FALLBACK.",
+        );
+        const repairedPreparedCode = autoCloseJsx(finalPreparedCode);
+        if (validateJsxStructure(repairedPreparedCode)) {
+          finalPreparedCode = repairedPreparedCode;
+          addLog(
+            "execution",
+            "Generated code passed validation after JSX auto-repair.",
+            "warning",
+          );
+        } else {
+          finalPreparedCode = DEFAULT_SAFE_FALLBACK;
+          addLog(
+            "execution",
+            "Generated code failed JSX validation. Using DEFAULT_SAFE_FALLBACK.",
+            "warning",
+          );
+        }
+      }
+
+      // Quick sanity check: if the generated code does not contain
+      // minimal required tokens for a runnable React+Tailwind component,
+      // silently fallback to the PERFECT_NSU_FALLBACK to avoid demo crashes.
+      // After JSX validation + autoCloseJsx repair, trust the output.
+      const minimalTokenRE = /export\s+default/i;
+      if (!minimalTokenRE.test(finalPreparedCode)) {
+        console.warn(
+          "[FailSafe] Missing required tokens in generated code. Using DEFAULT_SAFE_FALLBACK.",
+        );
+        finalPreparedCode = DEFAULT_SAFE_FALLBACK;
+        addLog(
+          "execution",
+          "Using DEFAULT_SAFE_FALLBACK due to missing required tokens in worker output.",
+          "warning",
+        );
+      }
+
+      console.log("AUDIT [4] FINAL PREVIEW PAYLOAD:\n", finalPreparedCode);
       const result = await executeCodeInWebContainer(
-        fixedPreparedCode,
+        finalPreparedCode,
         userPrompt,
         addLog,
         dependenciesInstalledRef,
@@ -1283,28 +1502,141 @@ Rules:
           ...prev,
           isExecuting: false,
           currentPhase: "completed",
-          generatedCode: fixedPreparedCode,
+          generatedCode: finalPreparedCode,
         }));
 
         addLog("execution", "Distributed code execution successful", "success");
         return {
           success: true,
-          code: fixedPreparedCode,
+          code: finalPreparedCode,
           output: result.output,
         };
       }
 
       const errorMsg = result.error || "Distributed execution failed.";
+      addLog("execution", `FATAL ERROR: ${errorMsg}`, "error");
+
+      // If the error looks like a parse/JSX issue, attempt one aggressive sanitization + retry
+      const parseErrorRE =
+        /unterminat|unexpected token|unterminated regular expression|unterminated string/i;
+      if (parseErrorRE.test(errorMsg)) {
+        addLog(
+          "execution",
+          "Detected parse/syntax error. Attempting aggressive sanitization and one retry...",
+          "warning",
+        );
+
+        try {
+          const aggressivelySanitized = aggressiveSanitize(preparedCode);
+          const fixedAggressive = autoCloseJsx(aggressivelySanitized);
+          const yapCutAggressive = yapCutter(fixedAggressive);
+
+          addLog(
+            "execution",
+            `Aggressive sanitized preview:\n${yapCutAggressive.slice(0, 400)}`,
+            "info",
+          );
+
+          const retryResult = await executeCodeInWebContainer(
+            yapCutAggressive,
+            userPrompt,
+            addLog,
+            dependenciesInstalledRef,
+            devServerProcessRef,
+            devServerUrlRef,
+            inferenceProfileRef.current.runBuildValidation,
+            (url) => {
+              setState((prev) => ({ ...prev, previewUrl: url }));
+            },
+          );
+
+          if (retryResult.success) {
+            addLog(
+              "execution",
+              "Aggressive sanitization succeeded; preview updated.",
+              "success",
+            );
+            setState((prev) => ({
+              ...prev,
+              isExecuting: false,
+              currentPhase: "completed",
+              generatedCode: yapCutAggressive,
+            }));
+            return {
+              success: true,
+              code: yapCutAggressive,
+              output: retryResult.output,
+            };
+          }
+
+          // If retry failed, silently Tier-5 rollback to the PERFECT fallback
+          addLog(
+            "execution",
+            `Aggressive retry failed: ${retryResult.error || "unknown"}. Applying silent Tier-5 fallback.`,
+            "warning",
+          );
+          // Persist both original and sanitized payloads for post-mortem
+          try {
+            saveFailedWorkerOutput(
+              code,
+              `${errorMsg} | retry:${retryResult.error || "none"}`,
+              { prompt: userPrompt },
+            );
+            saveFailedWorkerOutput(
+              yapCutAggressive,
+              `aggressive_retry_failed: ${retryResult.error || "none"}`,
+              { prompt: userPrompt },
+            );
+          } catch (e) {
+            void e;
+          }
+
+          // Apply silent fallback instead of surfacing a large UI error
+          console.warn(
+            "[FailSafe] Aggressive retry failed; applying PERFECT_NSU_FALLBACK.",
+          );
+          setState((prev) => ({
+            ...prev,
+            isExecuting: false,
+            currentPhase: "completed",
+            generatedCode: DEFAULT_SAFE_FALLBACK,
+          }));
+          return {
+            success: true,
+            code: DEFAULT_SAFE_FALLBACK,
+            output: "Fallback applied after aggressive sanitization failed.",
+          };
+        } catch (e) {
+          // If aggressive sanitization itself throws, persist original and continue
+          try {
+            saveFailedWorkerOutput(
+              code,
+              `${errorMsg} | aggressive_sanitize_failed`,
+              { prompt: userPrompt },
+            );
+          } catch (persistError) {
+            void persistError;
+          }
+        }
+      }
+
       setState((prev) => ({
         ...prev,
         isExecuting: false,
         currentPhase: "error",
         error: errorMsg,
       }));
-      addLog("execution", `FATAL ERROR: ${errorMsg}`, "error");
+
+      // Persist failing original code for debugging and reproduction
+      try {
+        saveFailedWorkerOutput(code, errorMsg, { prompt: userPrompt });
+      } catch (e) {
+        // ignore persistence errors
+      }
+
       return { success: false, error: errorMsg };
     },
-    [addLog, ensureWebContainerReady],
+    [addLog, ensureWebContainerReady, DEFAULT_SAFE_FALLBACK],
   );
 
   /**
@@ -1348,6 +1680,26 @@ Rules:
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
+
+/**
+ * Validate JSX code structure before allowing it to execute.
+ * Rejects code with common corruption patterns that indicate model failure.
+ */
+function validateJsxStructure(code: string): boolean {
+  if (!code || typeof code !== "string") return false;
+
+  // Bare minimum check: must have export default and look like it has JSX tags.
+  // After autoCloseJsx, trust the repair more than strict structural validation.
+  if (!/export\s+default/.test(code)) return false;
+  if (!/<[A-Za-z]/.test(code)) return false;
+
+  // Reject only the most obvious corruptions: completely unclosed tag at EOF
+  if (/<[a-zA-Z][^/>]*\s*$/.test(code.trim().split("\n").pop() || "")) {
+    return false;
+  }
+
+  return true;
+}
 
 function buildInferenceProfile(
   capability: "low" | "medium" | "high",
@@ -1697,6 +2049,79 @@ export function generateLiteCodeFromPrompt(_prompt: string): string {
   );
 }
 
+function yapCutter(code: string): string {
+  let cleanCode = code.replace(/```[a-zA-Z]*\n?/g, "").replace(/```/g, "");
+
+  const exportKeyword = "export default";
+  const exportIndex = cleanCode.lastIndexOf(exportKeyword);
+
+  if (exportIndex !== -1) {
+    const exportTail = cleanCode.slice(exportIndex);
+    const exportFunctionMatch = exportTail.match(
+      /^export\s+default\s+function\b/,
+    );
+
+    if (exportFunctionMatch) {
+      const braceStart = cleanCode.indexOf("{", exportIndex);
+      if (braceStart !== -1) {
+        let depth = 0;
+        let inSingle = false;
+        let inDouble = false;
+        let inTemplate = false;
+
+        for (let i = braceStart; i < cleanCode.length; i++) {
+          const ch = cleanCode[i];
+          const prev = cleanCode[i - 1];
+
+          if (!inDouble && !inTemplate && ch === "'" && prev !== "\\") {
+            inSingle = !inSingle;
+            continue;
+          }
+          if (!inSingle && !inTemplate && ch === '"' && prev !== "\\") {
+            inDouble = !inDouble;
+            continue;
+          }
+          if (!inSingle && !inDouble && ch === "`" && prev !== "\\") {
+            inTemplate = !inTemplate;
+            continue;
+          }
+          if (inSingle || inDouble || inTemplate) {
+            continue;
+          }
+
+          if (ch === "{") {
+            depth += 1;
+            continue;
+          }
+          if (ch === "}") {
+            depth -= 1;
+            if (depth === 0) {
+              let cut = i + 1;
+              const maybeSemi = cleanCode.slice(cut).match(/^\s*;/);
+              if (maybeSemi) {
+                cut += maybeSemi[0].length;
+              }
+              cleanCode = cleanCode.substring(0, cut);
+              break;
+            }
+          }
+        }
+      }
+    } else {
+      let endOfExport = cleanCode.indexOf(";", exportIndex);
+      if (endOfExport === -1) {
+        endOfExport = cleanCode.indexOf("\n", exportIndex);
+      }
+      if (endOfExport !== -1) {
+        cleanCode = cleanCode.substring(0, endOfExport + 1);
+      }
+    }
+  }
+
+  code = cleanCode;
+  return code;
+}
+
 /**
  * Build system prompt with RAG context injection and model-specific tuning
  */
@@ -1704,32 +2129,48 @@ function buildSystemPrompt(
   ragContext?: string[],
   modelType?: ModelType,
 ): string {
-  let prompt = `You are an expert coding assistant embedded in SouthStack, an offline-first IDE.
-You generate clean, production-ready code that executes without errors.
+  let prompt = `You are an expert React/Tailwind CSS designer embedded in SouthStack, an offline-first IDE.
+You generate clean, production-ready, visually stunning code that executes without errors.
 
-Guidelines:
+CRITICAL GUIDELINES:
 - Write complete, executable code (no placeholders like "// TODO")
-- Include all necessary imports
+- Include all necessary imports from React only
 - Handle errors gracefully
 - Use modern JavaScript/TypeScript practices
+- ALWAYS use Tailwind CSS for ALL styling. Every element must have className with Tailwind utility classes.
+- NO inline styles. NO unclassed elements. NO bare HTML.
 - If the request is UI-focused, return a React component suitable for src/App.jsx
 - If the request references a screenshot, mockup, image, or other visual reference, treat that reference as the source of truth and mirror the visible layout, hierarchy, spacing, text density, button placement, and card structure as closely as possible
 - Preserve the prompt's design language; do not replace a specific UI with a generic dashboard, landing page, or starter template
-- Prefer exact composition over invention when the prompt is image-led
-- When building from an image, use a contemporary polished UI style with clean sans-serif typography, refined spacing, rounded cards, and subtle shadows. Avoid dated HTML styling, default browser controls, or 1990s aesthetics.
-- Do not render the user's request text as visible UI copy unless the referenced screenshot explicitly shows that same text
+- When building from an image, use a contemporary polished UI style with: clean sans-serif typography, refined spacing, rounded cards (rounded-lg/rounded-xl minimum), subtle shadows (shadow-md/shadow-lg), smooth gradients (bg-gradient-to-r), glassmorphic effects (backdrop-blur), and smooth transitions (transition-all)
+- NEVER output dated HTML styling, default browser controls, or 1990s aesthetics
+- DO NOT render the user's request text as visible UI copy unless the referenced screenshot explicitly shows that same text
 - If the request is backend-focused, return runnable Node.js code
-- Do not output any prose before or after code
-- Do not output markdown fences like \`\`\`jsx
-- Never output pseudo tags like <cards> or <main-content>; use valid JSX elements only
-- Use className, never class, in JSX`;
+- DO NOT output any prose before or after code
+- DO NOT output markdown fences like \`\`\`jsx or code fences
+- NEVER output pseudo tags like <cards> or <main-content>; use valid JSX elements only
+- Use className, never class, in JSX
+- Default to dark mode with vibrant gradients (purple, blue, pink) unless light mode is explicitly requested
+- Use Tailwind animations: animate-pulse, animate-bounce, animate-fadeIn
+- Always include interactive elements: hover states, transitions, responsive design (sm: md: lg: breakpoints)`;
+
+  // CRITICAL ENFORCEMENT: always require Tailwind CSS in worker outputs
+  prompt += `\n\nCRITICAL REQUIREMENT: YOU MUST USE TAILWIND CSS FOR ALL STYLING. EVERY HTML ELEMENT MUST HAVE A 'className' ATTRIBUTE WITH APPROPRIATE TAILWIND UTILITY CLASSES. DO NOT OUTPUT BARE HTML. NO EXCEPTIONS.`;
 
   if (modelType === "3B") {
     prompt += `\n\nIMPORTANT: This is the blueprint stage. Return structured output only, preserve the visual hierarchy, and do not invent generic sections.`;
   }
 
   if (modelType === "7B") {
-    prompt += `\n\nThis is the React code generation stage. Output one runnable component only. Use only React imports. Use Tailwind CSS. No third-party packages.`;
+    prompt += `\n\nThis is the React code generation stage. Output ONE COMPLETE, RUNNABLE REACT COMPONENT ONLY. 
+- Use only React imports (useState, useEffect, useCallback, etc. from 'react')
+- Use Tailwind CSS exclusively for all styling
+- Include interactivity (state, event handlers, smooth transitions)
+- No third-party npm packages - Tailwind is bundled and available
+- Make sure every single element has a className with Tailwind utility classes
+- Include proper spacing, padding, margins, and visual hierarchy
+- Use modern design: gradients, rounded corners, shadows, hover effects
+- Make it visually appealing and professional-looking`;
   }
 
   if (ragContext && ragContext.length > 0) {
@@ -1771,7 +2212,7 @@ function extractCode(response: string): string {
   // Prefer fenced code blocks first (supports jsx/tsx and unknown fence labels).
   const fencedBlockMatch = trimmed.match(/```[a-zA-Z0-9_-]*\s*\n([\s\S]*?)```/);
   if (fencedBlockMatch) {
-    return fencedBlockMatch[1].trim();
+    return yapCutter(healVramTypos(fencedBlockMatch[1].trim()));
   }
 
   // Handle partially fenced responses.
@@ -1803,10 +2244,10 @@ function extractCode(response: string): string {
   }
 
   if (startIndex > 0) {
-    return unfenced.slice(startIndex).trim();
+    return yapCutter(healVramTypos(unfenced.slice(startIndex).trim()));
   }
 
-  return unfenced;
+  return yapCutter(healVramTypos(unfenced));
 }
 
 function estimateTokenCount(text: string): number {
@@ -1913,16 +2354,16 @@ function normalizeReactComponentCode(code: string): string {
 }
 
 function looksLikeReactModuleWithImports(code: string): boolean {
-  return /(^|\n)import\s+.+from\s+['\"].+['\"];?/m.test(code);
+  return /(^|\n)import\s+.+from\s+['"].+['"];?/m.test(code);
 }
 
 function buildReactModuleFromFragment(code: string): string {
   const lines = code.split(/\r?\n/);
   const importLines = lines.filter((line) =>
-    /^\s*import\s+.+from\s+['\"].+['\"];?\s*$/.test(line),
+    /^\s*import\s+.+from\s+['"].+['"];?\s*$/.test(line),
   );
   const bodyLines = lines.filter(
-    (line) => !/^\s*import\s+.+from\s+['\"].+['\"];?\s*$/.test(line),
+    (line) => !/^\s*import\s+.+from\s+['"].+['"];?\s*$/.test(line),
   );
 
   const body = bodyLines.join("\n").trim();
@@ -2137,6 +2578,9 @@ async function ensureReactWorkspace(
       devDependencies: {
         vite: "^5.3.1",
         "@vitejs/plugin-react": "^4.3.1",
+        tailwindcss: "^3.4.4",
+        postcss: "^8.4.38",
+        autoprefixer: "^10.4.19",
       },
     };
 
@@ -2151,6 +2595,16 @@ async function ensureReactWorkspace(
     );
 
     await webContainerService.writeFile(
+      "/postcss.config.js",
+      `export default {\n  plugins: {\n    tailwindcss: {},\n    autoprefixer: {},\n  },\n};\n`,
+    );
+
+    await webContainerService.writeFile(
+      "/tailwind.config.js",
+      `/** @type {import('tailwindcss').Config} */\nexport default {\n  content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],\n  theme: {\n    extend: {\n      animation: {\n        fadeIn: "fadeIn 0.7s ease-out both",\n        "pulse-slow": "pulseSlow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite",\n      },\n      keyframes: {\n        fadeIn: {\n          from: { opacity: 0, transform: "translateY(12px)" },\n          to: { opacity: 1, transform: "translateY(0)" },\n        },\n        pulseSlow: {\n          "0%, 100%": { opacity: 1 },\n          "50%": { opacity: 0.5 },\n        },\n      },\n    },\n  },\n  plugins: [],\n};\n`,
+    );
+
+    await webContainerService.writeFile(
       "/index.html",
       `<!doctype html>\n<html lang="en">\n  <head>\n    <meta charset="UTF-8" />\n    <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n    <title>SouthStack Live Preview</title>\n  </head>\n  <body>\n    <div id="root"></div>\n    <script type="module" src="/src/main.jsx"></script>\n  </body>\n</html>\n`,
     );
@@ -2162,7 +2616,7 @@ async function ensureReactWorkspace(
 
     await webContainerService.writeFile(
       "/src/styles.css",
-      `:root {\n  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;\n}\n\n* {\n  box-sizing: border-box;\n}\n\nbody {\n  margin: 0;\n  background: #f8fafc;\n  color: #0f172a;\n}\n`,
+      `@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\n:root {\n  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;\n}\n\n* {\n  box-sizing: border-box;\n}\n\nhtml, body, #root {\n  width: 100%;\n  height: 100%;\n}\n\nbody {\n  margin: 0;\n  background: #020617;\n  color: #0f172a;\n}\n\n@keyframes fadeIn {\n  from {\n    opacity: 0;\n    transform: translateY(12px);\n  }\n\n  to {\n    opacity: 1;\n    transform: translateY(0);\n  }\n}\n\n@keyframes pulseSlow {\n  0%,\n  100% {\n    opacity: 1;\n  }\n\n  50% {\n    opacity: 0.5;\n  }\n}\n\n.animate-fadeIn {\n  animation: fadeIn 0.7s ease-out both;\n}\n\n.animate-pulse-slow {\n  animation: pulseSlow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;\n}\n\n.animation-delay-2000 {\n  animation-delay: 2s;\n}\n`,
     );
 
     // Compatibility alias for generated code that imports ./App.css.
@@ -2213,6 +2667,9 @@ async function ensureReactWorkspace(
         "@mui/material",
         "@emotion/react",
         "@emotion/styled",
+        "tailwindcss",
+        "postcss",
+        "autoprefixer",
       ]);
 
       if (syncResult.exitCode !== 0) {

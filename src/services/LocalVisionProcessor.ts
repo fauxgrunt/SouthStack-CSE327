@@ -262,16 +262,26 @@ async function getVisionPipeline(): Promise<VisionPipeline> {
 
 export async function extractUIFromImage(imageBase64: string): Promise<string> {
   try {
+    // Step 1: Compress image once
     const compressedImageBase64 = await compressBase64Image(imageBase64);
+
+    // Step 2: Get vision pipeline ready
     const vision = await getVisionPipeline();
-    const ocrText = await extractOcrTextFromImage(compressedImageBase64);
 
-    const output = await withTimeout(
-      vision(compressedImageBase64, { max_new_tokens: 96 }),
-      INFERENCE_TIMEOUT_MS,
-      "Vision inference",
+    // Step 3: Run vision inference and OCR extraction in parallel using Promise.all
+    console.log(
+      "[LocalVisionProcessor] Starting Dual-Extraction Pipeline (parallel OCR + Vision)",
     );
+    const [output, ocrText] = await Promise.all([
+      withTimeout(
+        vision(compressedImageBase64, { max_new_tokens: 96 }),
+        INFERENCE_TIMEOUT_MS,
+        "Vision inference",
+      ),
+      extractOcrTextFromImage(compressedImageBase64),
+    ]);
 
+    // Step 4: Process vision results
     const caption = normalizeCaptionResult(output);
     if (!caption) {
       throw new Error("Local vision model did not return a caption.");
@@ -280,6 +290,7 @@ export async function extractUIFromImage(imageBase64: string): Promise<string> {
     const sanitizedCaption = autoCorrectHallucinatedText(caption);
     const sanitizedOcrText = autoCorrectHallucinatedText(ocrText);
 
+    // Step 5: Build prompt with vision-based structure
     const promptParts = [
       `UI screenshot description: ${sanitizedCaption}`,
       sanitizedOcrText ? `Visible text in image: ${sanitizedOcrText}` : "",
@@ -298,7 +309,17 @@ export async function extractUIFromImage(imageBase64: string): Promise<string> {
       "Canonical login copy to preserve when present: RDS, NSU Portal : Login, Username, Please enter your username, Next, Current Server Time: 04:40:40 AM, Forgot your password?, Developed & Maintained By Office of IT, NSU",
     ].filter(Boolean);
 
-    const prompt = promptParts.join("\n");
+    // Step 6: Append OCR section with strong formatting
+    const ocrSection = sanitizedOcrText
+      ? `
+
+=== EXACT TEXT CONTENT (VIA OCR) ===
+${sanitizedOcrText}
+
+CRITICAL INSTRUCTION: You MUST use the exact text from the OCR section above for all headings, labels, and buttons. This is the ground truth extracted directly from the image via Optical Character Recognition.`
+      : "";
+
+    const prompt = promptParts.join("\n") + ocrSection;
     const sanitizedPrompt = autoCorrectHallucinatedText(prompt);
 
     if (containsForbiddenHallucination(prompt)) {
@@ -307,6 +328,9 @@ export async function extractUIFromImage(imageBase64: string): Promise<string> {
       );
     }
 
+    console.log(
+      "[LocalVisionProcessor] Dual-Extraction Pipeline completed successfully",
+    );
     return sanitizedPrompt;
   } catch (error) {
     console.error(

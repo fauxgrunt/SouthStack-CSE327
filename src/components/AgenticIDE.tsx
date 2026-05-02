@@ -30,6 +30,11 @@ import type { SwarmTaskPayload } from "../hooks/useSwarm";
 import { executeWorkerTaskWithStreaming } from "../services/swarmOrchestrator";
 import { extractUIFromImage } from "../services/LocalVisionProcessor";
 import { limitArraySize } from "../utils/performance";
+import {
+  isBuildThisPrompt,
+  shouldSkipDecomposition,
+  logAutoDetectionDecision,
+} from "../utils/buildPromptDetector";
 import { AgentActivityStream } from "./AgentActivityStream";
 import { CollaborativeCodeEditor } from "./CollaborativeCodeEditor";
 import { SwarmConnectWidget } from "./SwarmConnectWidget";
@@ -75,7 +80,20 @@ function sanitizeDistributedWorkerCode(code: string): string {
     return safeImportPattern.test(line);
   });
 
-  return sanitizedLines.join("\n").trim();
+  // Re-join and apply lightweight auto-corrections for common generator typos
+  let joined = sanitizedLines.join("\n").trim();
+
+  // Auto-correct common misspellings of `export default`
+  // e.g. `export deflt`, `export defaul`, `export defalut` -> `export default`
+  joined = joined.replace(
+    /^export\s+(deflt|defaul|defalut|defaut)\b/im,
+    "export default",
+  );
+
+  // Fix accidental `export default` omissions like `export defult` (typo)
+  joined = joined.replace(/^export\s+defu?l?t?\b/im, "export default");
+
+  return joined;
 }
 
 // NOTE: Retry helpers removed to enforce single-shot, fatal-on-failure behavior.
@@ -430,6 +448,31 @@ export const AgenticIDE: React.FC = () => {
     };
     setChatHistory((prev) => [...prev, userMessage]);
 
+    // Auto-detect "build this" style prompts
+    const willSkipDecomposition = shouldSkipDecomposition(
+      trimmed,
+      Boolean(attachedImageDataUrl),
+      lowEndMode,
+    );
+
+    logAutoDetectionDecision(
+      trimmed,
+      Boolean(attachedImageDataUrl),
+      lowEndMode,
+      willSkipDecomposition,
+    );
+
+    if (willSkipDecomposition) {
+      const statusMessage: ChatMessage = {
+        id: `assistant_${Date.now()}_auto_detect`,
+        role: "assistant",
+        content:
+          "🎯 Auto-detected 'build this' request with image attachment. Skipping task decomposition and going directly to code generation...",
+        timestamp: new Date(),
+      };
+      setChatHistory((prev) => [...prev, statusMessage]);
+    }
+
     if (shouldOffloadToWorker) {
       setActiveTab("split");
       const taskId = `p2p_ui_${Date.now()}`;
@@ -772,6 +815,21 @@ export const AgenticIDE: React.FC = () => {
           message,
         });
       };
+
+      // Auto-detect "build this" style prompts for direct code generation
+      const isBuildPrompt = isBuildThisPrompt(payload.prompt);
+      logAutoDetectionDecision(
+        payload.prompt,
+        Boolean(payload.imageBytes),
+        lowEndMode,
+        isBuildPrompt,
+      );
+
+      if (isBuildPrompt) {
+        sendStatus(
+          "🎯 Auto-detected 'build this' prompt - skipping task decomposition and going directly to code generation...",
+        );
+      }
 
       sendStatus("Task received. Worker preparing generation pipeline...");
 
