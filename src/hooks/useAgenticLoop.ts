@@ -147,39 +147,37 @@ function isRecoverableEngineInstanceError(error: unknown): boolean {
 
 function healVramTypos(code: string, onHealed?: () => void): string {
   const original = code;
-  const result = (
-    code
-      // Fix mangled export statements
-      .replace(/export dult\b/g, "export default")
-      .replace(/expor default\b/g, "export default")
-      .replace(/export defalt\b/g, "export default")
-      .replace(/export defaut\b/g, "export default")
-      // Brute force catch-all for the bottom of the file
-      .replace(/export [a-zA-Z]+ App;/g, "export default App;")
+  const result = code
+    // Fix mangled export statements
+    .replace(/export dult\b/g, "export default")
+    .replace(/expor default\b/g, "export default")
+    .replace(/export defalt\b/g, "export default")
+    .replace(/export defaut\b/g, "export default")
+    // Brute force catch-all for the bottom of the file
+    .replace(/export [a-zA-Z]+ App;/g, "export default App;")
 
-      // Fix standard HTML tags
-      .replace(/<ma\b/g, "<main")
-      .replace(/<\/ma>/g, "</main>")
-      .replace(/<hader\b/g, "<header")
-      .replace(/<\/hader>/g, "</header>")
-      .replace(/<fooer\b/g, "<footer")
-      .replace(/<\/fooer>/g, "</footer>")
-      .replace(/<foter\b/g, "<footer")
-      .replace(/<\/foter>/g, "</footer>")
+    // Fix standard HTML tags
+    .replace(/<ma\b/g, "<main")
+    .replace(/<\/ma>/g, "</main>")
+    .replace(/<hader\b/g, "<header")
+    .replace(/<\/hader>/g, "</header>")
+    .replace(/<fooer\b/g, "<footer")
+    .replace(/<\/fooer>/g, "</footer>")
+    .replace(/<foter\b/g, "<footer")
+    .replace(/<\/foter>/g, "</footer>")
 
-      // Fix React attributes
-      .replace(/clssName=/g, "className=")
-      .replace(/cassName=/g, "className=")
-      .replace(/clasName=/g, "className=")
-      .replace(/onChane=/g, "onChange=")
+    // Fix React attributes
+    .replace(/clssName=/g, "className=")
+    .replace(/cassName=/g, "className=")
+    .replace(/clasName=/g, "className=")
+    .replace(/onChane=/g, "onChange=")
 
-      // Fix common HTML attributes
-      .replace(/tpe="/g, 'type="')
-      .replace(/placohlder=/g, "placeholder=")
-      .replace(/placehoder=/g, "placeholder=")
-      // Fix double-closed self-closing input tags produced by VRAM mangling
-      .replace(/<input \/>/g, "<input")
-  );
+    // Fix common HTML attributes
+    .replace(/tpe="/g, 'type="')
+    .replace(/placohlder=/g, "placeholder=")
+    .replace(/placehoder=/g, "placeholder=")
+    // Fix double-closed self-closing input tags produced by VRAM mangling
+    .replace(/<input \/>/g, "<input");
 
   if (result !== original && typeof onHealed === "function") {
     try {
@@ -1451,7 +1449,9 @@ Rules:
           }
         }
 
-        finalPreparedCode = healVramTypos(finalPreparedCode, () => { typosHealed++; });
+        finalPreparedCode = healVramTypos(finalPreparedCode, () => {
+          typosHealed++;
+        });
       } catch (e) {
         void e;
       }
@@ -1460,7 +1460,14 @@ Rules:
       const isValidJsxStructure = validateJsxStructure(finalPreparedCode);
       if (!isValidJsxStructure) {
         console.warn(
-          "[JSXValidator] Generated code failed structural validation. Using DEFAULT_SAFE_FALLBACK.",
+          "[JSXValidator] Generated code failed structural validation.",
+          {
+            codeLength: finalPreparedCode.length,
+            hasExportDefault: /export\s+default/.test(finalPreparedCode),
+            hasJsxTag: /<[A-Za-z]/.test(finalPreparedCode),
+            lastLine: finalPreparedCode.trim().split("\n").pop(),
+            preview: finalPreparedCode.slice(0, 200),
+          },
         );
         const repairedPreparedCode = autoCloseJsx(finalPreparedCode);
         if (validateJsxStructure(repairedPreparedCode)) {
@@ -1471,6 +1478,15 @@ Rules:
             "warning",
           );
         } else {
+          console.warn(
+            "[JSXValidator] Auto-repair also failed. Using DEFAULT_SAFE_FALLBACK.",
+            {
+              repairedLength: repairedPreparedCode.length,
+              hasExportDefault: /export\s+default/.test(repairedPreparedCode),
+              hasJsxTag: /<[A-Za-z]/.test(repairedPreparedCode),
+              lastLine: repairedPreparedCode.trim().split("\n").pop(),
+            },
+          );
           finalPreparedCode = DEFAULT_SAFE_FALLBACK;
           addLog(
             "execution",
@@ -1503,7 +1519,7 @@ Rules:
         "Total Generation Time (s)": ((endTime - startTime) / 1000).toFixed(2),
         "VRAM Typos Auto-Fixed": typosHealed,
         "Code Size (Characters)": generatedPayload.length,
-        "Status": "Success",
+        Status: "Success",
       });
 
       console.log("AUDIT [4] FINAL PREVIEW PAYLOAD:\n", finalPreparedCode);
@@ -1516,7 +1532,12 @@ Rules:
         devServerUrlRef,
         inferenceProfileRef.current.runBuildValidation,
         (url) => {
-          setState((prev) => ({ ...prev, previewUrl: url }));
+          console.log("[PreviewCallback] Setting previewUrl to:", url);
+          setState((prev) => {
+            const newState = { ...prev, previewUrl: url };
+            console.log("[PreviewCallback] New state:", newState);
+            return newState;
+          });
         },
       );
 
@@ -2722,6 +2743,10 @@ async function ensureDevServerRunning(
   onPreviewUrlChange: (url: string | null) => void,
 ): Promise<ExecutionResult> {
   if (devServerProcessRef.current && devServerUrlRef.current) {
+    console.log(
+      "[DevServer] Server already running, invoking callback with URL:",
+      devServerUrlRef.current,
+    );
     onPreviewUrlChange(devServerUrlRef.current);
     return {
       success: true,
@@ -2731,14 +2756,19 @@ async function ensureDevServerRunning(
 
   try {
     addLog("execution", "Starting Vite dev server...", "info");
+    console.log("[DevServer] Starting fresh dev server instance...");
 
     const serverReadyPromise = new Promise<string>((resolve, reject) => {
       const container = webContainerService.getContainer();
       const timeout = window.setTimeout(() => {
+        console.error(
+          "[DevServer] Timeout waiting for server-ready event after 90s",
+        );
         reject(new Error("Timed out waiting for dev server to become ready"));
       }, DEV_SERVER_STARTUP_TIMEOUT_MS);
 
       container.on("server-ready", (port, url) => {
+        console.log("[DevServer] server-ready event fired:", { port, url });
         if (port === 4173) {
           window.clearTimeout(timeout);
           resolve(url);
@@ -2762,9 +2792,17 @@ async function ensureDevServerRunning(
       devServerUrlRef.current = null;
     });
 
+    console.log("[DevServer] Waiting for server-ready promise...");
     const url = await serverReadyPromise;
+    console.log("[DevServer] Server ready promise resolved with URL:", url);
+
     devServerUrlRef.current = url;
+    console.log(
+      "[DevServer] Invoking onPreviewUrlChange callback with URL:",
+      url,
+    );
     onPreviewUrlChange(url);
+    console.log("[DevServer] Callback invoked");
 
     return {
       success: true,
@@ -2772,6 +2810,7 @@ async function ensureDevServerRunning(
     };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error";
+    console.error("[DevServer] Error:", message);
     return {
       success: false,
       output: message,
@@ -2820,16 +2859,19 @@ async function executeCodeInWebContainer(
   }
 
   addLog("execution", "Detected React/JS UI mode", "info");
+  console.log("[ExecuteReact] Processing as React app");
 
   const workspaceResult = await ensureReactWorkspace(
     addLog,
     dependenciesInstalledRef,
   );
   if (!workspaceResult.success) {
+    console.error("[ExecuteReact] Workspace setup failed:", workspaceResult);
     return workspaceResult;
   }
 
   const appCode = normalizeReactComponentCode(code);
+  console.log("[ExecuteReact] Normalized app code length:", appCode.length);
 
   // Sanitize markdown backticks that may come from worker responses
   const safeCode = appCode
@@ -2837,13 +2879,24 @@ async function executeCodeInWebContainer(
     .replace(/```/g, "")
     .trim();
 
+  console.log(
+    "[ExecuteReact] Safe code length after sanitization:",
+    safeCode.length,
+  );
+  console.log("[ExecuteReact] Writing code to /src/App.jsx...");
+
   await webContainerService.writeFile("/src/App.jsx", safeCode);
   addLog("execution", "Updated /src/App.jsx in WebContainer", "success");
+  console.log("[ExecuteReact] File written successfully");
 
   if (runBuildValidation) {
     addLog("execution", "Running build validation...", "info");
     const buildResult = await webContainerService.exec("npm", ["run", "build"]);
     if (buildResult.exitCode !== 0) {
+      console.error(
+        "[ExecuteReact] Build failed:",
+        buildResult.output.slice(-500),
+      );
       return {
         success: false,
         output: buildResult.output,
@@ -2858,6 +2911,7 @@ async function executeCodeInWebContainer(
     );
   }
 
+  console.log("[ExecuteReact] Calling ensureDevServerRunning...");
   const devServerResult = await ensureDevServerRunning(
     addLog,
     devServerProcessRef,
@@ -2866,9 +2920,11 @@ async function executeCodeInWebContainer(
   );
 
   if (!devServerResult.success) {
+    console.error("[ExecuteReact] Dev server failed:", devServerResult);
     return devServerResult;
   }
 
+  console.log("[ExecuteReact] Dev server running, execution complete");
   return {
     success: true,
     output: `React app built successfully. ${devServerResult.output}`,
