@@ -145,8 +145,9 @@ function isRecoverableEngineInstanceError(error: unknown): boolean {
   );
 }
 
-function healVramTypos(code: string): string {
-  return (
+function healVramTypos(code: string, onHealed?: () => void): string {
+  const original = code;
+  const result = (
     code
       // Fix mangled export statements
       .replace(/export dult\b/g, "export default")
@@ -179,6 +180,16 @@ function healVramTypos(code: string): string {
       // Fix double-closed self-closing input tags produced by VRAM mangling
       .replace(/<input \/>/g, "<input")
   );
+
+  if (result !== original && typeof onHealed === "function") {
+    try {
+      onHealed();
+    } catch (e) {
+      // ignore errors from callback
+    }
+  }
+
+  return result;
 }
 
 /**
@@ -191,6 +202,9 @@ function healVramTypos(code: string): string {
  * 4. Self-healing loop on errors
  */
 export const useAgenticLoop = () => {
+  const startTime = performance.now();
+  let typosHealed = 0;
+
   const [state, setState] = useState<AgenticLoopState>({
     isInitialized: false,
     isLoading: false,
@@ -1437,7 +1451,7 @@ Rules:
           }
         }
 
-        finalPreparedCode = healVramTypos(finalPreparedCode);
+        finalPreparedCode = healVramTypos(finalPreparedCode, () => { typosHealed++; });
       } catch (e) {
         void e;
       }
@@ -1482,6 +1496,15 @@ Rules:
           "warning",
         );
       }
+
+      const endTime = performance.now();
+      const generatedPayload = finalPreparedCode;
+      console.table({
+        "Total Generation Time (s)": ((endTime - startTime) / 1000).toFixed(2),
+        "VRAM Typos Auto-Fixed": typosHealed,
+        "Code Size (Characters)": generatedPayload.length,
+        "Status": "Success",
+      });
 
       console.log("AUDIT [4] FINAL PREVIEW PAYLOAD:\n", finalPreparedCode);
       const result = await executeCodeInWebContainer(
