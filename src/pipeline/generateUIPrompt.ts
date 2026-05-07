@@ -5,6 +5,46 @@ export interface UIGenerationRequest {
   previousCode?: string;
 }
 
+/**
+ * Auto-detect prompt depth (shallow vs deep) to guide generation strategy.
+ * Shallow: vague/minimal → model should intelligently improvise standard UI patterns.
+ * Deep: specific/detailed → model should follow exact specs without guessing.
+ */
+function detectPromptDepth(prompt: string): "shallow" | "deep" {
+  const trimmed = prompt.trim().toLowerCase();
+  const wordCount = trimmed.split(/\s+/).length;
+  
+  // Specificity indicators for deep prompts
+  const deepIndicators = [
+    /\b(exact|specific|must|should|require|layout|position|align|color|font|size|padding|margin|spacing|button|input|form|table|grid|flex|shadow|border|radius|width|height|max-|min-)\b/gi,
+    /:\s*\d+|%|px|em|rem|\d+\s*(min|sec|hour|color|color code|rgb|hex)/gi,
+    /\[\s*|{.*}/gi, // lists or structured notation
+    /\bwith\s+|and\s+|include|containing|showing/gi, // enumerating features
+  ];
+  
+  let deepScore = 0;
+  deepIndicators.forEach((indicator) => {
+    const matches = trimmed.match(indicator);
+    if (matches) deepScore += matches.length;
+  });
+  
+  // Shallow indicators
+  const shallowPhrases = [
+    /^create\s+\w+|^build\s+\w+|^make\s+\w+/i,
+    /\bUI\b|\binterface\b|\bscreen\b/i,
+  ];
+  
+  let shallowScore = 0;
+  shallowPhrases.forEach((phrase) => {
+    if (phrase.test(trimmed)) shallowScore++;
+  });
+  
+  // Scoring logic: if deep indicators found or word count is high, it's deep; otherwise shallow.
+  if (deepScore > 3 || wordCount > 40) return "deep";
+  if (shallowScore > 0 && deepScore < 2) return "shallow";
+  return wordCount > 15 ? "deep" : "shallow";
+}
+
 export function buildSystemPrompt(): string {
   return `You are an expert React UI component generator. Your goal is to produce pixel-perfect, production-ready React code that exactly matches the provided UI specifications.
 
@@ -41,6 +81,7 @@ OUTPUT MUST BE: Valid, executable React code that renders immediately without er
 
 export function buildUserPrompt(request: UIGenerationRequest): string {
   const parts: string[] = [];
+  const depth = detectPromptDepth(request.prompt);
 
   if (request.screenshot || request.screenshotDescription) {
     parts.push("=== SCREENSHOT CONTEXT ===");
@@ -50,6 +91,27 @@ export function buildUserPrompt(request: UIGenerationRequest): string {
     );
     parts.push("");
   }
+
+  parts.push("=== PROMPT DEPTH ANALYSIS ===");
+  if (depth === "shallow") {
+    parts.push(
+      "SHALLOW PROMPT DETECTED: The request is minimal/vague. You MUST intelligently improvise a polished, complete UI.",
+    );
+    parts.push(
+      "- Infer standard UI patterns (buttons, inputs, headers, footers, sections) that fit the intent.",
+    );
+    parts.push("- Add reasonable default features (e.g., for a timer: start/pause/stop/reset buttons, progress bar, presets).");
+    parts.push("- Do NOT ask for clarification. Do NOT output partial code.");
+    parts.push("- Build a production-ready, visually polished component.");
+  } else {
+    parts.push(
+      "DEEP PROMPT DETECTED: The request is specific and detailed. Follow the exact specifications provided.",
+    );
+    parts.push("- Do NOT invent additional features not mentioned.");
+    parts.push("- Match exact layout, colors, labels, and behavior described.");
+    parts.push("- If specifications conflict with best practices, follow the specifications.");
+  }
+  parts.push("");
 
   parts.push("=== OUTPUT RULES ===");
   parts.push("- Output only the App component code.");
@@ -63,9 +125,6 @@ export function buildUserPrompt(request: UIGenerationRequest): string {
     "- Do not create any import statements except from 'react' if needed.",
   );
   parts.push("- Apply ALL styles using Tailwind className attributes only.");
-  parts.push(
-    "- If the prompt is short or vague, intelligently improvise a polished UI that fits the intent.",
-  );
   parts.push(
     "- Do not repeat words like App, placeholder labels, or filler text to pad the layout.",
   );
