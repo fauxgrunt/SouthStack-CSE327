@@ -1,0 +1,109 @@
+export interface UIGenerationRequest {
+  prompt: string;
+  screenshot?: string;
+  screenshotDescription?: string;
+  previousCode?: string;
+}
+
+export function buildSystemPrompt(): string {
+  return `You are an expert React UI component generator. Your goal is to produce pixel-perfect, production-ready React code that exactly matches the provided UI specifications.
+
+CRITICAL REQUIREMENTS:
+1. Generate ONE complete, self-contained App component only.
+2. Export as: export default function App() { ... }
+3. Use ONLY inline Tailwind CSS classes for styling. NO external CSS files. NO CSS imports. NO style= attributes.
+4. Do not import any custom UI libraries, icon libraries, or component packages.
+5. Do not import ANY CSS files, fonts, or stylesheets.
+6. Import React only if needed. Never import from react-dom or react-dom/client.
+7. Emit exactly ONE and ONLY ONE default export.
+8. Use ONLY these built-in HTML/SVG elements: div, section, header, main, footer, article, nav, label, input, button, span, svg, path, circle, rect, line, polygon, text, tspan, img, p, h1, h2, h3, h4, h5, h6, a, ul, li, form. NOTHING ELSE.
+9. FORBIDDEN: Do not create ANY custom component tags. Absolutely NO <CustomComponent>, <Button>, <Card>, <Icon>, <DB>, <RDS>, or any other custom components. Every tag MUST be lowercase HTML or SVG.
+10. Every HTML element MUST be properly closed with matching tags. <div>...</div> not <div>...
+11. NO console.log, NO comments, NO debug code.
+12. NO markdown in output - ONLY valid JSX code.
+13. All styling must be applied via className prop with Tailwind utilities. Example: className="flex items-center justify-center bg-blue-500".
+
+QUALITY STANDARDS:
+- Match the exact layout, spacing, alignment, and proportions shown in the reference.
+- Preserve all visible text exactly as shown (case-sensitive).
+- Match colors, gradients, shadows, and visual hierarchy precisely using only Tailwind classes.
+- Use appropriate semantic HTML tags.
+- Ensure responsive behavior where applicable.
+- Maintain accessibility (alt text, labels, ARIA where needed).
+
+OUTPUT MUST BE: Valid, executable React code that renders immediately without errors. NO imports except React.`;
+}
+
+export function buildUserPrompt(request: UIGenerationRequest): string {
+  const parts: string[] = [];
+
+  if (request.screenshot || request.screenshotDescription) {
+    parts.push("=== SCREENSHOT CONTEXT ===");
+    parts.push(
+      request.screenshotDescription?.trim() ||
+        "Match the visible structure and style shown in the screenshot exactly.",
+    );
+    parts.push("");
+  }
+
+  parts.push("=== OUTPUT RULES ===");
+  parts.push("- Output only the App component code.");
+  parts.push("- Do not output markdown, explanation text, or comments.");
+  parts.push("- Do not import from react-dom or react-dom/client.");
+  parts.push("- Do not import any CSS files, fonts, or stylesheets.");
+  parts.push(
+    "- Do not emit multiple default exports or missing default export.",
+  );
+  parts.push(
+    "- Do not create any import statements except from 'react' if needed.",
+  );
+  parts.push("- Apply ALL styles using Tailwind className attributes only.");
+  parts.push("");
+
+  if (request.previousCode?.trim()) {
+    parts.push("=== CURRENT VERSION ===");
+    parts.push(request.previousCode.trim());
+    parts.push("");
+    parts.push("=== REFINEMENT REQUEST ===");
+    parts.push(request.prompt.trim());
+  } else {
+    parts.push("=== BUILD REQUEST ===");
+    parts.push(request.prompt.trim());
+  }
+
+  parts.push("");
+  parts.push(
+    "Generate the complete React component NOW. Output ONLY valid JSX code with no imports except React.",
+  );
+
+  return parts.join("\n");
+}
+
+export function buildRepairPrompt(
+  code: string,
+  validationErrors: string[],
+): string {
+  return [
+    "YOU MUST FIX THIS CODE. CRITICAL: Output must be: export default function App() { return (...); }",
+    "",
+    "REQUIRED FIXES:",
+    "1. Ensure the code exports EXACTLY ONE default function named App",
+    "2. The first line must start with: export default function App()",
+    "3. The last line before closing brace must have a return() with JSX",
+    "4. Remove all custom component tags (no <CustomComponent>, <Button>, <Card>, <DB>, etc.)",
+    "5. Replace any custom components with built-in HTML elements (div, section, etc.)",
+    "6. Remove all CSS file imports (no import '/App.css', etc.)",
+    "7. Remove all imports except from 'react' if needed",
+    "8. Ensure ALL HTML tags are properly closed and balanced (<div>...</div>)",
+    "9. Apply all styles using Tailwind className attributes only",
+    "10. Do not import from react-dom or react-dom/client",
+    "",
+    "VALIDATION ERRORS TO FIX:",
+    ...validationErrors.map((error) => `- ${error}`),
+    "",
+    "BROKEN CODE:",
+    code,
+    "",
+    "FIXED CODE (MUST export default function App):",
+  ].join("\n");
+}

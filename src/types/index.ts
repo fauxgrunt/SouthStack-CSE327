@@ -466,7 +466,7 @@ export const SUPPORTED_LANGUAGES: FileLanguage[] = [
   "css",
 ];
 
-// MODEL_PRESETS - strict staged pipeline presets
+// MODEL_PRESETS - linear pipeline presets
 export const STRICT_MODEL_REGISTRY = Object.freeze({
   VISION_BLUEPRINT: Object.freeze({
     id: "Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC",
@@ -498,51 +498,3 @@ export const DEFAULT_INFERENCE_OPTIONS: InferenceOptions = {
   presence_penalty: 0,
   frequency_penalty: 0,
 };
-
-// ============================================================================
-// P2P SWARM TYPES
-// ============================================================================
-
-export type SwarmMode = "master" | "worker" | "standalone";
-
-export type SwarmTaskType = "TASK_ASSIGN" | "TASK_COMPLETE" | "STATUS_UPDATE";
-
-export interface SwarmTaskPayload {
-  taskId: string;
-  fileName: string;
-  instructions: string;
-  type?: SwarmTaskType;
-  sharedContext?: string; // Shared project context for coordinated code generation
-}
-
-export interface TaskCompletePayload {
-  type: "TASK_COMPLETE";
-  taskId: string;
-  fileName: string;
-  code: string;
-  error?: string;
-}
-
-export interface TaskAssignment {
-  fileName: string;
-  instructions: string;
-}
-
-export interface SwarmTaskInfo {
-  taskId: string;
-  assignment: TaskAssignment;
-  nodeId: string;
-  status: "pending" | "completed" | "failed";
-  code?: string;
-  error?: string;
-  timestamp: number;
-}
-
-export interface SwarmProgress {
-  total: number;
-  completed: number;
-  pending: number;
-  failed: number;
-  timedOut: number;
-  percentage: number;
-}

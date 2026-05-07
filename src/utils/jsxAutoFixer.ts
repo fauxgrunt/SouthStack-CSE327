@@ -1,4 +1,113 @@
 /**
+ * Replace custom JSX components (capitalized tags that aren't built-ins) with divs.
+ * Examples: <Button>, <Card>, <Icon>, <DB> -> all become <div>
+ * Only replaces complete tags to avoid breaking strings or attributes.
+ */
+function replaceCustomComponentsWithDiv(code: string): string {
+  let fixed = code;
+
+  // List of all valid built-in HTML and SVG elements (lowercase)
+  const validElements = new Set([
+    "div",
+    "span",
+    "p",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "section",
+    "article",
+    "header",
+    "footer",
+    "main",
+    "nav",
+    "form",
+    "label",
+    "input",
+    "button",
+    "textarea",
+    "select",
+    "ul",
+    "ol",
+    "li",
+    "dl",
+    "dt",
+    "dd",
+    "table",
+    "thead",
+    "tbody",
+    "tfoot",
+    "tr",
+    "td",
+    "th",
+    "a",
+    "img",
+    "picture",
+    "video",
+    "audio",
+    "source",
+    "svg",
+    "path",
+    "circle",
+    "rect",
+    "line",
+    "polygon",
+    "polyline",
+    "text",
+    "tspan",
+    "g",
+    "defs",
+    "use",
+    "symbol",
+    "marker",
+    "figure",
+    "figcaption",
+    "time",
+    "code",
+    "pre",
+    "blockquote",
+    "em",
+    "strong",
+    "b",
+    "i",
+    "mark",
+    "small",
+    "sub",
+    "sup",
+    "br",
+    "hr",
+    "iframe",
+    "canvas",
+    "script",
+    "style",
+    "meta",
+    "title",
+    "link",
+    "base",
+    "head",
+    "html",
+    "body",
+  ]);
+
+  // More conservative replacement: only match complete opening/closing tags
+  // Pattern: <TagName or </TagName followed by space or >
+  fixed = fixed.replace(
+    /<\/?([A-Z][A-Za-z0-9]*)(?=[\s/>])/g,
+    (match, tagName) => {
+      if (validElements.has(tagName.toLowerCase())) {
+        return match; // Keep valid elements
+      }
+      // Replace custom component with div, preserving the closing slash if present
+      return match.startsWith("</") ? "</div" : "<div";
+    },
+  );
+
+  return fixed;
+}
+
+/**
  * Fix incomplete JSX attribute handlers like onChange={(e) => func(
  * by detecting unclosed parentheses within attribute expressions and closing them.
  */
@@ -75,6 +184,9 @@ export function autoCloseJsx(code: string): string {
   if (!code || typeof code !== "string") return code;
 
   let fixed = code;
+
+  // First, replace any custom components with divs to prevent validation errors
+  fixed = replaceCustomComponentsWithDiv(fixed);
 
   // Fix incomplete JSX attribute handlers: detect patterns like `onChange={(e) => func(`
   // and close them properly before they break JSX parsing.

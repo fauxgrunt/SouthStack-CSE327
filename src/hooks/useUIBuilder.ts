@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { cleanGeneratedCode } from "../pipeline/cleaning";
+import { validateGeneratedCode } from "../pipeline/validation";
 import { webContainerService } from "../services/webcontainer";
 
 type LogType = "info" | "success" | "error" | "warning";
@@ -93,6 +95,17 @@ export function useUIBuilder(
       onLog?.("execution", "[Executing] Bundling and launching UI...", "info");
 
       try {
+        const cleanedCode = cleanGeneratedCode(generatedCode);
+        const validation = validateGeneratedCode(cleanedCode);
+
+        if (!validation.valid) {
+          const message = `Preview rejected invalid code: ${validation.errors.join("; ")}`;
+          setError(message);
+          onLog?.("execution", message, "error");
+          setIsBuilding(false);
+          return;
+        }
+
         await webContainerService.boot();
 
         await webContainerService.mkdir("/src");
@@ -148,17 +161,17 @@ export function useUIBuilder(
 
         await webContainerService.writeFile(
           "/index.html",
-          `<!doctype html>\n<html lang="en">\n  <head>\n    <meta charset="UTF-8" />\n    <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n    <title>SouthStack Canvas Preview</title>\n  </head>\n  <body>\n    <div id="root"></div>\n    <script type="module" src="/src/main.jsx"></script>\n  </body>\n</html>\n`,
+          `<!DOCTYPE html>\n<html lang="en">\n  <head>\n    <meta charset="UTF-8" />\n    <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n    <title>Preview</title>\n    <!-- Tailwind CDN fallback: guarantees styles even if PostCSS build fails -->\n    <script src="https://cdn.tailwindcss.com" crossorigin></script>\n    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap" rel="stylesheet"/>\n  </head>\n  <body>\n    <div id="root"></div>\n    <script type="module" src="/src/main.jsx"></script>\n  </body>\n</html>\n`,
         );
 
         await webContainerService.writeFile(
           "/src/main.jsx",
-          `import React from "react";\nimport ReactDOM from "react-dom/client";\nimport App from "./index.js";\nimport "./styles.css";\n\nReactDOM.createRoot(document.getElementById("root")).render(\n  <React.StrictMode>\n    <App />\n  </React.StrictMode>,\n);\n`,
+          `import React from "react";\nimport ReactDOM from "react-dom/client";\nimport App from "./index.jsx";\nimport "./styles.css";\n\nReactDOM.createRoot(document.getElementById("root")).render(\n  <React.StrictMode>\n    <App />\n  </React.StrictMode>,\n);\n`,
         );
 
         await webContainerService.writeFile(
-          "/src/index.js",
-          normalizeReactCode(generatedCode),
+          "/src/index.jsx",
+          normalizeReactCode(cleanedCode),
         );
 
         if (!dependenciesInstalledRef.current) {

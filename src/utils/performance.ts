@@ -80,6 +80,12 @@ export async function detectDeviceCapability(): Promise<
     return "low";
   }
 
+  // Treat 4 GB or less as low-end by default so the pipeline stays within
+  // tight VRAM/memory budgets.
+  if (memory <= 4 || cores <= 4) {
+    return "low";
+  }
+
   // Check GPU tier (if WebGPU available)
   let gpuTier: "low" | "medium" | "high" = "medium";
   const navigatorWithGPU = navigator as typeof navigator & {
