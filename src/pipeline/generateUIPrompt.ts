@@ -67,6 +67,8 @@ CRITICAL REQUIREMENTS:
 11. NO console.log, NO comments, NO debug code.
 12. NO markdown in output - ONLY valid JSX code.
 13. All styling must be applied via className prop with Tailwind utilities. Example: className="flex items-center justify-center bg-blue-500".
+14. IMAGES: If the prompt mentions images, use SVG placeholders or CSS gradients ONLY. Do NOT include <img> tags with placeholder paths or broken src attributes. If unclear about images, use colored divs or SVG shapes instead.
+15. TEXT: Do NOT include placeholder text like "path_to_image", "PropertyParams", or other OCR artifacts. Use real, contextually appropriate text. If uncertain, use semantic defaults (e.g., "Login", "Welcome", "Username", etc.)
 
 QUALITY STANDARDS:
 - Match the exact layout, spacing, alignment, and proportions shown in the reference.
@@ -169,6 +171,9 @@ export function buildRepairPrompt(
     "8. Ensure ALL HTML tags are properly closed and balanced (<div>...</div>)",
     "9. Apply all styles using Tailwind className attributes only",
     "10. Do not import from react-dom or react-dom/client",
+    "11. IMAGES: Remove <img> tags with placeholder/broken src (path_to_image, etc.). Use SVG or colored divs instead.",
+    "12. TEXT: Replace OCR artifacts and placeholder text. Use real, contextual labels (Username, Password, Login, Welcome, etc.). Remove gibberish like 'PropertyParams', 'BOOLE', etc.",
+    "13. SEMANTIC HTML: Use proper semantic tags (header, main, section, footer) for better structure. Avoid nested divs with identical styling.",
     "",
     "VALIDATION ERRORS TO FIX:",
     ...validationErrors.map((error) => `- ${error}`),

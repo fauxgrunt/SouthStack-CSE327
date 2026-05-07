@@ -85,6 +85,89 @@ export function aggressiveSanitize(code: string): string {
   out = out.replace(/^\s*===+\s*$/gm, "");
   out = out.replace(/^\s*---+\s*$/gm, "");
 
+  // Remove broken image paths (src="path_to_...", src="image", placeholder URIs)
+  out = out.replace(/src=["'](?:path_to_[^"']*|image|icon|photo|picture|placeholder|img[^"']*)["']/gi, "");
+  
+  // Remove img tags with broken/placeholder src entirely (vision artifacts)
+  out = out.replace(/<img[^>]*src=["'](?:path_to_[^"']*|image|placeholder)["'][^>]*\/?>/gi, "");
+
+  // Remove alt text that sounds like descriptions (contains "photo of", "image of", etc.) — likely OCR artifacts
+  out = out.replace(/alt=["'](?:[^"']*\s+(?:photo|image|picture|picture of|shows|displays|depicts|of a)[^"']*)["']/gi, "");
+
+  // Clean up obvious OCR gibberish in text content (e.g., "BOOLE", "PropertyParams" mixed with real words)
+  // Remove single-word strings that look like corrupted OCR (all caps with unusual patterns)
+  out = out
+    .split(/\r?\n/)
+    .map((line) => {
+      // Remove lines that are only OCR artifacts (e.g., single weird word like "PropertyParams", "BOOLE")
+      const textMatch = line.match(/["']([^"']+)["']/g);
+      if (textMatch) {
+        textMatch.forEach((match) => {
+          const text = match.slice(1, -1);
+          // If it looks like corrupted OCR (CamelCaseWithoutSpaces, all caps, etc.), flag it
+          const isSuspicious = /^[A-Z][a-z]*[A-Z]/.test(text) && text.length < 20 && !/\s/.test(text);
+          if (isSuspicious && !isLikelyValidWord(text)) {
+            line = line.replace(match, '""');
+          }
+        });
+      }
+      return line;
+    })
+    .join("\n");
+
   // Ensure JSX tags are closed (use existing auto-close heuristics in autoCloseJsx later)
   return out;
+}
+
+/**
+ * Detect if a string is likely a valid word/phrase vs OCR gibberish.
+ * Common valid CamelCase words: React, useState, className, onClick, etc.
+ * Gibberish: PropertyParams, BOOLE, etc.
+ */
+function isLikelyValidWord(text: string): boolean {
+  const commonWords = [
+    "React",
+    "useState",
+    "useEffect",
+    "className",
+    "onClick",
+    "onChange",
+    "onSubmit",
+    "innerHTML",
+    "href",
+    "src",
+    "alt",
+    "key",
+    "map",
+    "filter",
+    "reduce",
+    "import",
+    "export",
+    "default",
+    "function",
+    "const",
+    "let",
+    "var",
+    "return",
+    "if",
+    "else",
+    "for",
+    "while",
+  ];
+
+  if (commonWords.includes(text)) return true;
+
+  // If it contains common substrings (Button, Link, Page, Component, etc.), likely valid
+  if (
+    /(?:Button|Link|Page|Component|Header|Footer|Nav|Section|Item|List|Card|Modal|Form|Input|Label|Text|Image|Icon)/.test(
+      text,
+    )
+  ) {
+    return true;
+  }
+
+  // Real words often have vowels
+  if (!/[aeiouAEIOU]/.test(text)) return false;
+
+  return false;
 }
