@@ -8,6 +8,11 @@ export interface UIGenerationRequest {
 export function buildSystemPrompt(): string {
   return `You are an expert React UI component generator. Your goal is to produce pixel-perfect, production-ready React code that exactly matches the provided UI specifications.
 
+INTENT HANDLING:
+- If the user prompt is shallow or minimal, infer the missing product details and build a polished complete UI instead of asking follow-up questions.
+- If the user prompt is detailed, follow it precisely and do not invent extra requirements.
+- Never fill the output with repeated placeholder text, generic labels, or broken fragments.
+
 CRITICAL REQUIREMENTS:
 1. Generate ONE complete, self-contained App component only.
 2. Export as: export default function App() { ... }
@@ -58,6 +63,12 @@ export function buildUserPrompt(request: UIGenerationRequest): string {
     "- Do not create any import statements except from 'react' if needed.",
   );
   parts.push("- Apply ALL styles using Tailwind className attributes only.");
+  parts.push(
+    "- If the prompt is short or vague, intelligently improvise a polished UI that fits the intent.",
+  );
+  parts.push(
+    "- Do not repeat words like App, placeholder labels, or filler text to pad the layout.",
+  );
   parts.push("");
 
   if (request.previousCode?.trim()) {
@@ -85,6 +96,8 @@ export function buildRepairPrompt(
 ): string {
   return [
     "YOU MUST FIX THIS CODE. CRITICAL: Output must be: export default function App() { return (...); }",
+    "",
+    "INTENT: Repair the component without adding repeated filler text or generic placeholder content.",
     "",
     "REQUIRED FIXES:",
     "1. Ensure the code exports EXACTLY ONE default function named App",

@@ -1,10 +1,8 @@
 import React, { useCallback, useMemo, useRef, useState } from "react";
-import Editor from "@monaco-editor/react";
-import { Camera, Copy, Loader2, Play, Power, Trash2 } from "lucide-react";
+import { Camera, Loader2, Play, Power, Trash2 } from "lucide-react";
 import { useAgenticLoop } from "../hooks/useAgenticLoop";
 import { useVoiceInput } from "../hooks/useVoiceInput";
-
-type ActiveTab = "preview" | "code";
+import { EditablePreview } from "./EditablePreview";
 
 export const AgenticIDE: React.FC = () => {
   const {
@@ -17,15 +15,16 @@ export const AgenticIDE: React.FC = () => {
     clearHistory,
   } = useAgenticLoop();
 
-  const [activeTab, setActiveTab] = useState<ActiveTab>("preview");
   const [prompt, setPrompt] = useState("");
   const [screenshotDataUrl, setScreenshotDataUrl] = useState<string | null>(
     null,
   );
   const [screenshotName, setScreenshotName] = useState<string | null>(null);
   const [refinement, setRefinement] = useState("");
-  const [copied, setCopied] = useState(false);
   const [selectedLogIndex, setSelectedLogIndex] = useState<number | null>(null);
+  const [codeValidationError, setCodeValidationError] = useState<string | null>(
+    null,
+  );
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -95,7 +94,6 @@ export const AgenticIDE: React.FC = () => {
       });
 
       console.log("Generation complete:", result);
-      setActiveTab("preview");
       setRefinement("");
       setPrompt("");
       setScreenshotDataUrl(null);
@@ -112,15 +110,32 @@ export const AgenticIDE: React.FC = () => {
     voice,
   ]);
 
-  const handleCopy = useCallback(async () => {
-    if (!generatedCode) {
-      return;
-    }
+  const handleCodeSave = useCallback(async (editedCode: string) => {
+    // Validate the code before saving
+    try {
+      setCodeValidationError(null);
 
-    await navigator.clipboard.writeText(generatedCode);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1500);
-  }, [generatedCode]);
+      // Basic validation: ensure it starts with export default
+      if (!editedCode.includes("export default")) {
+        throw new Error("Code must contain 'export default' statement");
+      }
+
+      // Check for forbidden imports
+      const forbiddenImports = ["react-dom", "framer-motion", ".css", ".scss"];
+      for (const forbidden of forbiddenImports) {
+        if (editedCode.includes(forbidden)) {
+          throw new Error(`Forbidden import: ${forbidden}`);
+        }
+      }
+
+      console.log("Code saved and validated");
+    } catch (error) {
+      const errorMsg =
+        error instanceof Error ? error.message : "Validation failed";
+      setCodeValidationError(errorMsg);
+      throw error;
+    }
+  }, []);
 
   const renderProgressLogs = (compact = false) => (
     <div className={compact ? "space-y-2" : "space-y-3"}>
@@ -424,118 +439,38 @@ export const AgenticIDE: React.FC = () => {
             </div>
           </section>
 
-          {/* Right Panel: Output */}
-          <section className="flex min-h-[70vh] flex-col rounded-3xl border border-white/10 bg-slate-950/80 shadow-xl shadow-slate-950/30 backdrop-blur-xl">
-            {busy && latestLog ? (
-              <div className="border-b border-white/10 bg-cyan-400/5 px-5 py-3 text-xs text-cyan-200">
+          {/* Right Panel: Output with Editable Preview */}
+          <div className="min-h-[70vh]">
+            {busy && latestLog && (
+              <div className="mb-4 border border-white/10 rounded-3xl bg-cyan-400/5 px-5 py-3 text-xs text-cyan-200">
                 <span className="font-semibold uppercase tracking-[0.2em] text-cyan-300">
                   {latestLog.stage}
                 </span>{" "}
                 {latestLog.message}
               </div>
-            ) : null}
-            <div className="flex items-center justify-between gap-4 border-b border-white/10 px-5 py-3">
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => setActiveTab("preview")}
-                  className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-                    activeTab === "preview"
-                      ? "bg-cyan-400 text-slate-950"
-                      : "bg-white/5 text-slate-300 hover:bg-white/10"
-                  }`}
-                >
-                  Preview
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab("code")}
-                  className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-                    activeTab === "code"
-                      ? "bg-cyan-400 text-slate-950"
-                      : "bg-white/5 text-slate-300 hover:bg-white/10"
-                  }`}
-                >
-                  Code
-                </button>
-              </div>
-              <button
-                type="button"
-                onClick={handleCopy}
-                disabled={!generatedCode}
-                className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-slate-200 hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <Copy className="h-3.5 w-3.5" />
-                {copied ? "Copied" : "Copy"}
-              </button>
-            </div>
-
-            {busy ? (
-              <div className="border-b border-white/10 px-5 py-4">
+            )}
+            {busy && (
+              <div className="mb-4 border border-white/10 rounded-3xl bg-slate-900/50 px-5 py-4">
                 {renderProgressLogs(true)}
               </div>
-            ) : null}
-
-            <div className="flex-1 p-4 overflow-hidden">
-              {state.error ? (
-                <div className="flex h-full items-center justify-center rounded-2xl border border-rose-500/30 bg-rose-950/20 px-6 text-center">
-                  <div>
-                    <p className="text-[11px] uppercase tracking-[0.35em] text-rose-300">
-                      Generation error
-                    </p>
-                    <p className="mt-3 text-sm text-rose-200">{state.error}</p>
-                  </div>
-                </div>
-              ) : activeTab === "preview" ? (
-                previewUrl ? (
-                  <iframe
-                    src={previewUrl}
-                    title="Generated preview"
-                    className="h-full w-full rounded-2xl border border-white/10 bg-slate-900"
-                  />
-                ) : (
-                  <div className="flex h-full items-center justify-center rounded-2xl border border-dashed border-white/10 bg-white/5 text-center text-slate-400">
-                    {busy ? (
-                      <div className="flex flex-col items-center gap-2">
-                        <Loader2 className="h-6 w-6 animate-spin text-cyan-400" />
-                        <p className="text-sm">Generating preview...</p>
-                      </div>
-                    ) : (
-                      <p className="text-sm">Preview will appear here</p>
-                    )}
-                  </div>
-                )
-              ) : (
-                <div className="h-full rounded-2xl border border-white/10 bg-slate-900/80 overflow-hidden">
-                  <Editor
-                    height="100%"
-                    defaultLanguage="tsx"
-                    value={
-                      generatedCode ||
-                      "export default function App() {\n  return null;\n}"
-                    }
-                    theme="vs-dark"
-                    options={{
-                      minimap: { enabled: false },
-                      fontSize: 13,
-                      wordWrap: "on",
-                      scrollBeyondLastLine: false,
-                      automaticLayout: true,
-                      readOnly: true,
-                    }}
-                  />
-                </div>
-              )}
-            </div>
-
-            {state.error && (
-              <div className="border-t border-white/10 px-5 py-4 bg-rose-950/20 border-t-rose-500/30">
-                <p className="text-sm text-rose-300">
-                  <span className="font-semibold">Error:</span> {state.error}
+            )}
+            {state.error || codeValidationError ? (
+              <div className="mb-4 border border-rose-500/30 rounded-3xl bg-rose-950/20 px-6 py-4">
+                <p className="text-[11px] uppercase tracking-[0.35em] text-rose-300">
+                  Error
+                </p>
+                <p className="mt-2 text-sm text-rose-200">
+                  {state.error || codeValidationError}
                 </p>
               </div>
-            )}
-          </section>
+            ) : null}
+            <EditablePreview
+              previewUrl={previewUrl}
+              generatedCode={generatedCode}
+              onCodeSave={handleCodeSave}
+              error={state.error}
+            />
+          </div>
         </main>
       </div>
     </div>
