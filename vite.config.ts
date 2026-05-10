@@ -14,14 +14,13 @@ export default defineConfig({
     },
   },
   optimizeDeps: {
-    exclude: ["@mlc-ai/web-llm", "@webcontainer/api"],
+    exclude: ["@webcontainer/api"],
   },
   build: {
     target: "esnext",
     rollupOptions: {
       output: {
         manualChunks: {
-          webllm: ["@mlc-ai/web-llm"],
           // Note: webcontainer is dynamically imported only when needed
           "syntax-highlighter": ["react-syntax-highlighter"],
           xterm: ["@xterm/xterm", "@xterm/addon-fit"],

@@ -86,13 +86,22 @@ export function aggressiveSanitize(code: string): string {
   out = out.replace(/^\s*---+\s*$/gm, "");
 
   // Remove broken image paths (src="path_to_...", src="image", placeholder URIs)
-  out = out.replace(/src=["'](?:path_to_[^"']*|image|icon|photo|picture|placeholder|img[^"']*)["']/gi, "");
-  
+  out = out.replace(
+    /src=["'](?:path_to_[^"']*|image|icon|photo|picture|placeholder|img[^"']*)["']/gi,
+    "",
+  );
+
   // Remove img tags with broken/placeholder src entirely (vision artifacts)
-  out = out.replace(/<img[^>]*src=["'](?:path_to_[^"']*|image|placeholder)["'][^>]*\/?>/gi, "");
+  out = out.replace(
+    /<img[^>]*src=["'](?:path_to_[^"']*|image|placeholder)["'][^>]*\/?>/gi,
+    "",
+  );
 
   // Remove alt text that sounds like descriptions (contains "photo of", "image of", etc.) — likely OCR artifacts
-  out = out.replace(/alt=["'](?:[^"']*\s+(?:photo|image|picture|picture of|shows|displays|depicts|of a)[^"']*)["']/gi, "");
+  out = out.replace(
+    /alt=["'](?:[^"']*\s+(?:photo|image|picture|picture of|shows|displays|depicts|of a)[^"']*)["']/gi,
+    "",
+  );
 
   // Clean up obvious OCR gibberish in text content (e.g., "BOOLE", "PropertyParams" mixed with real words)
   // Remove single-word strings that look like corrupted OCR (all caps with unusual patterns)
@@ -105,7 +114,10 @@ export function aggressiveSanitize(code: string): string {
         textMatch.forEach((match) => {
           const text = match.slice(1, -1);
           // If it looks like corrupted OCR (CamelCaseWithoutSpaces, all caps, etc.), flag it
-          const isSuspicious = /^[A-Z][a-z]*[A-Z]/.test(text) && text.length < 20 && !/\s/.test(text);
+          const isSuspicious =
+            /^[A-Z][a-z]*[A-Z]/.test(text) &&
+            text.length < 20 &&
+            !/\s/.test(text);
           if (isSuspicious && !isLikelyValidWord(text)) {
             line = line.replace(match, '""');
           }

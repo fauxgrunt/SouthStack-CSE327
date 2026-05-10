@@ -2,8 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { executeGeneration } from "../pipeline/uiGenerationPipeline";
 import type { UIGenerationRequest } from "../pipeline/generateUIPrompt";
 import { webContainerService } from "../services/webcontainer";
-import { initializeWebLLM } from "../services/webllm";
-import { blockUntilModelReady } from "../services/webllm-readiness";
+import { hasGroqApiKey } from "../services/groqClient";
 import { useGenerationHistory } from "./useGenerationHistory";
 import { useUIBuilder } from "./useUIBuilder";
 
@@ -47,7 +46,7 @@ const initialState: AgenticLoopState = {
 
 export function buildHardenedCoderSystemPrompt(): string {
   return [
-    "You are a browser-first React UI builder.",
+    "You are a browser-first Groq-powered React UI builder.",
     "Generate a single, self-contained App component.",
     "Use Tailwind CSS only.",
     "Never output multiple files.",
@@ -118,43 +117,53 @@ export const useAgenticLoop = () => {
       currentPhase: "initialize",
       error: null,
     }));
-    addLog("init", "Starting comprehensive model initialization...", "info");
+    addLog("init", "Starting Groq-first runtime initialization...", "info");
 
     try {
-      // Phase 1: Initialize WebLLM with progress tracking
-      addLog("init", "Downloading and caching model shards...", "info");
-      await initializeWebLLM((report) => {
-        if (report.text) {
-          addLog("init", report.text, "info");
-        }
-      });
-      addLog("init", "✓ Model shards downloaded and cached", "success");
-
-      // Phase 2: Block until model is fully ready (strict readiness check)
-      addLog("init", "Verifying model readiness...", "info");
-      const readinessState = await blockUntilModelReady((state) => {
-        if (state.shardsDownloaded && !state.shardsInCache) {
-          addLog("init", "✓ Shards downloaded, verifying cache...", "info");
-        } else if (state.shardsLoadedInGPU && !state.inferenceTestPassed) {
-          addLog("init", "✓ Model loaded in GPU, testing inference...", "info");
-        } else if (state.inferenceTestPassed) {
-          addLog("init", "✓ Inference test passed, model ready", "success");
-        }
-      });
-
-      if (!readinessState.totalReady) {
-        throw new Error(
-          readinessState.lastError ||
-            "Model failed readiness checks. Please try again.",
-        );
+      if (!hasGroqApiKey()) {
+        const message =
+          "Groq API key not configured. Add VITE_GROQ_API_KEY to .env.local and restart the dev server.";
+        setState((prev) => ({
+          ...prev,
+          isLoading: false,
+          currentPhase: "error",
+          error: message,
+        }));
+        addLog("init", `✗ ${message}`, "error");
+        return;
       }
 
-      addLog("init", "✓ WebLLM model fully ready for inference", "success");
+      addLog("init", "✓ Groq API key detected", "success");
 
-      // Phase 3: Boot WebContainer runtime
-      addLog("init", "Booting WebContainer runtime...", "info");
-      await webContainerService.boot();
-      addLog("init", "✓ WebContainer initialized", "success");
+      addLog(
+        "init",
+        "Booting WebContainer runtime (this may take a moment)...",
+        "info",
+      );
+      try {
+        await webContainerService.boot();
+        addLog("init", "✓ WebContainer initialized", "success");
+      } catch (bootError: any) {
+        const bootMsg =
+          bootError instanceof Error ? bootError.message : String(bootError);
+
+        // Check if it's a timeout - allow Groq-only mode
+        if (/timeout|Failed to boot/i.test(bootMsg)) {
+          addLog(
+            "init",
+            `⚠ WebContainer unavailable (${bootMsg}). Switching to code-generation-only mode.`,
+            "warning",
+          );
+          addLog(
+            "init",
+            "✓ Groq code generation is ready (live preview will be code-only)",
+            "success",
+          );
+        } else {
+          // For other errors, treat as fatal
+          throw bootError;
+        }
+      }
 
       setIsBootstrapped(true);
 
@@ -166,10 +175,12 @@ export const useAgenticLoop = () => {
       }));
       addLog(
         "init",
-        "✅ Ready! Model is fully initialized. You can now generate UIs.",
+        "✅ Ready! Groq code generation is initialized. You can generate UI code and view it directly.",
         "success",
       );
-      console.log("[Init] Model readiness state:", readinessState);
+      console.log(
+        "[Init] Groq-first runtime initialized (WebContainer may be unavailable)",
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setState((prev) => ({
@@ -217,10 +228,12 @@ export const useAgenticLoop = () => {
           ...prev,
           isGenerating: false,
           currentPhase: result.validationPassed ? "complete" : "error",
-          generatedCode: result.validationPassed ? result.code : null,
+          // Keep code available for preview/editing even when validation fails.
+          generatedCode: result.code,
           error: result.validationPassed
             ? null
-            : result.errors.join("; ") || "Generated code was rejected.",
+            : result.errors.join("; ") ||
+              "Generated code needed fallback repair.",
         }));
         addLog(
           "gen",

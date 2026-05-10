@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Login Fixture</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        background: #fff;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: flex-start;
+        font-family: Arial, sans-serif;
+      }
+      .space {
+        height: 50px;
+      }
+      .card {
+        width: 540px;
+        height: 280px;
+        margin-top: 0;
+        background: linear-gradient(135deg, #5852c7 0%, #25c3df 100%);
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+        position: relative;
+        color: #fff;
+      }
+      .rds {
+        position: absolute;
+        left: 16px;
+        top: 14px;
+        color: #ffd321;
+        font-size: 28px;
+      }
+      .title {
+        position: absolute;
+        left: 154px;
+        top: 60px;
+        color: #ffd321;
+        font-weight: 700;
+        font-size: 20px;
+      }
+      .icon-shield {
+        position: absolute;
+        left: 38px;
+        top: 69px;
+        width: 82px;
+        height: 110px;
+        background: #2084d1;
+        border-radius: 18px;
+      }
+      .icon-lock {
+        position: absolute;
+        left: 63px;
+        top: 97px;
+        width: 32px;
+        height: 30px;
+        border-radius: 5px;
+        background: #ffcc20;
+      }
+      .icon-body {
+        position: absolute;
+        left: 49px;
+        top: 125px;
+        width: 58px;
+        height: 30px;
+        background: #ffcc20;
+      }
+      .username {
+        position: absolute;
+        left: 154px;
+        top: 130px;
+        font-size: 17px;
+      }
+      .input {
+        position: absolute;
+        left: 244px;
+        top: 123px;
+        width: 280px;
+        height: 40px;
+        background: #fff;
+        color: #9f9f9f;
+        display: flex;
+        align-items: center;
+        padding-left: 22px;
+        box-sizing: border-box;
+      }
+      .user-icon {
+        position: absolute;
+        right: 11px;
+        top: 12px;
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        background: #9f9f9f;
+      }
+      .user-icon::after {
+        content: "";
+        position: absolute;
+        left: 3px;
+        top: 14px;
+        width: 12px;
+        height: 5px;
+        border-radius: 2px;
+        background: #9f9f9f;
+      }
+      .next {
+        position: absolute;
+        right: 40px;
+        top: 176px;
+        width: 80px;
+        height: 44px;
+        background: #2f9d49;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 18px;
+      }
+      .time {
+        position: absolute;
+        left: 16px;
+        bottom: 13px;
+        font-size: 14px;
+      }
+      .forgot {
+        position: absolute;
+        right: 15px;
+        bottom: 11px;
+        font-size: 16px;
+        font-weight: 700;
+      }
+      .footer-line {
+        width: 1204px;
+        height: 1px;
+        background: #dcdcdc;
+        margin-top: 77px;
+      }
+      .footer-text {
+        margin-top: 19px;
+        color: #5d9fe3;
+        font-size: 15px;
+        font-weight: 700;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="space"></div>
+    <div class="card">
+      <div class="rds">RDS</div>
+      <div class="title">NSU Portal : Login</div>
+      <div class="icon-shield"></div>
+      <div class="icon-lock"></div>
+      <div class="icon-body"></div>
+      <div class="username">Username</div>
+      <div class="input">
+        Please enter your username
+        <div class="user-icon"></div>
+      </div>
+      <div class="next">Next</div>
+      <div class="time">Current Server Time: 04:40:40 AM</div>
+      <div class="forgot">Forgot your password?</div>
+    </div>
+    <div class="footer-line"></div>
+    <div class="footer-text">
+      Developed &amp; Maintained By Office of IT, NSU
+    </div>
+  </body>
+</html>

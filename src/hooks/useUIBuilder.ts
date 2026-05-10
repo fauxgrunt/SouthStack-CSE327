@@ -44,23 +44,13 @@ export function useUIBuilder(
   const onLog = options?.onLog;
 
   const waitForPreviewServer = async (timeoutMs: number): Promise<string> => {
-    return new Promise<string>((resolve, reject) => {
-      const container = webContainerService.getContainer();
-      const timeout = window.setTimeout(() => {
-        reject(
-          new Error(
-            "Timed out waiting for preview server startup. Device may be slow; retrying once.",
-          ),
-        );
-      }, timeoutMs);
-
-      container.on("server-ready", (port, url) => {
-        if (port === 4173) {
-          window.clearTimeout(timeout);
-          resolve(url);
-        }
-      });
-    });
+    try {
+      return await webContainerService.waitForServerUrl(4173, timeoutMs);
+    } catch (_e) {
+      throw new Error(
+        "Timed out waiting for preview server startup. Device may be slow; retrying once.",
+      );
+    }
   };
 
   useEffect(() => {
@@ -96,17 +86,88 @@ export function useUIBuilder(
 
       try {
         const cleanedCode = cleanGeneratedCode(generatedCode);
-        const validation = validateGeneratedCode(cleanedCode);
+        const cleanedValidation = validateGeneratedCode(cleanedCode);
+        const originalValidation = validateGeneratedCode(generatedCode);
 
-        if (!validation.valid) {
-          const message = `Preview rejected invalid code: ${validation.errors.join("; ")}`;
+        // Cleaning can occasionally over-fix valid JSX; preserve original if it validates.
+        const codeForPreview =
+          cleanedValidation.valid || !originalValidation.valid
+            ? cleanedCode
+            : generatedCode;
+
+        const effectiveValidation = validateGeneratedCode(codeForPreview);
+
+        if (!effectiveValidation.valid) {
+          const message = `Preview rejected invalid code: ${effectiveValidation.errors.join("; ")}`;
           setError(message);
           onLog?.("execution", message, "error");
           setIsBuilding(false);
           return;
         }
 
-        await webContainerService.boot();
+        // Boot WebContainer only if not already ready. Handle single-instance boot errors gracefully.
+        try {
+          if (!webContainerService.isReady()) {
+            // Add a short timeout for boot attempt - if it takes more than 15 seconds, fall back to code view
+            const bootPromise = webContainerService.boot();
+            const bootTimeoutPromise = new Promise((_, reject) => {
+              setTimeout(
+                () =>
+                  reject(
+                    new Error(
+                      "WebContainer boot timeout - switching to code-only view",
+                    ),
+                  ),
+                15000,
+              );
+            });
+
+            await Promise.race([bootPromise, bootTimeoutPromise]);
+          }
+        } catch (bootErr: any) {
+          const msg = String(bootErr?.message || bootErr);
+
+          // Check for various boot failure scenarios
+          if (/Only a single WebContainer instance can be booted/i.test(msg)) {
+            onLog?.(
+              "execution",
+              "WebContainer already booted in this browser context. Live preview will be unavailable in this tab.",
+              "warning",
+            );
+            previewSupportedRef.current = false;
+            setError(
+              "Live preview unavailable: single WebContainer instance already active in this browser.",
+            );
+            setIsBuilding(false);
+            return;
+          }
+
+          // For timeout or other boot failures, fall back to code-only display
+          if (/timeout|Failed to boot|SharedArrayBuffer/i.test(msg)) {
+            onLog?.(
+              "execution",
+              `Live preview unavailable (${msg}). Displaying generated code instead.`,
+              "warning",
+            );
+            previewSupportedRef.current = false;
+
+            // Still validate the code but just show it without running it
+            if (!cancelled) {
+              setPreviewUrl(null);
+              setError(null);
+              setIsBuilding(false);
+              onLog?.(
+                "execution",
+                `✓ Code generated and validated (${codeForPreview.length} chars). Live preview unavailable - showing code only.`,
+                "success",
+              );
+            }
+            return;
+          }
+
+          // For other unexpected errors, rethrow
+          throw bootErr;
+        }
 
         await webContainerService.mkdir("/src");
 
@@ -161,17 +222,17 @@ export function useUIBuilder(
 
         await webContainerService.writeFile(
           "/index.html",
-          `<!DOCTYPE html>\n<html lang="en">\n  <head>\n    <meta charset="UTF-8" />\n    <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n    <title>Preview</title>\n    <!-- Tailwind CDN fallback: guarantees styles even if PostCSS build fails -->\n    <script src="https://cdn.tailwindcss.com" crossorigin></script>\n    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap" rel="stylesheet"/>\n  </head>\n  <body>\n    <div id="root"></div>\n    <script type="module" src="/src/main.jsx"></script>\n  </body>\n</html>\n`,
+          `<!DOCTYPE html>\n<html lang="en">\n  <head>\n    <meta charset="UTF-8" />\n    <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n    <title>Preview</title>\n  </head>\n  <body>\n    <div id="root"></div>\n    <script type="module" src="/src/main.jsx"></script>\n  </body>\n</html>\n`,
         );
 
         await webContainerService.writeFile(
           "/src/main.jsx",
-          `import React from "react";\nimport ReactDOM from "react-dom/client";\nimport App from "./index.jsx";\nimport "./styles.css";\n\nReactDOM.createRoot(document.getElementById("root")).render(\n  <React.StrictMode>\n    <App />\n  </React.StrictMode>,\n);\n`,
+          `import React from "react";\nimport ReactDOM from "react-dom/client";\nimport App from "./index.jsx";\nimport "./styles.css";\n\nclass ErrorBoundary extends React.Component {\n  constructor(props) {\n    super(props);\n    this.state = { hasError: false, error: null };\n  }\n\n  static getDerivedStateFromError(error) {\n    return { hasError: true, error };\n  }\n\n  componentDidCatch(error, errorInfo) {\n    console.error("Error in generated preview:", error, errorInfo);\n  }\n\n  render() {\n    if (this.state.hasError) {\n      return (\n        <div style={{\n          padding: "24px",\n          fontFamily: "system-ui, sans-serif",\n          color: "#fff",\n          background: "#1a1a2e",\n          minHeight: "100vh",\n          display: "flex",\n          alignItems: "center",\n          justifyContent: "center"\n        }}>\n          <div style={{\n            maxWidth: "500px",\n            padding: "24px",\n            background: "#16213e",\n            borderRadius: "8px",\n            border: "1px solid #e94560"\n          }}>\n            <h1 style={{ margin: "0 0 16px 0", color: "#e94560" }}>Preview Error</h1>\n            <p style={{ margin: "0 0 12px 0", fontSize: "14px", color: "#ccc" }}>\n              The generated code encountered a runtime error:\n            </p>\n            <pre style={{\n              background: "#0f3460",\n              padding: "12px",\n              borderRadius: "4px",\n              overflow: "auto",\n              fontSize: "12px",\n              color: "#58ff3d",\n              margin: "0"\n            }}>\n              {this.state.error?.message || "Unknown error"}\n            </pre>\n            <p style={{\n              marginTop: "16px",\n              fontSize: "12px",\n              color: "#999"\n            }}>\n              Common issues:\n              <br/>• Using undefined components (e.g., &lt;Button /&gt; without defining it)\n              <br/>• Missing imports\n              <br/>• Syntax errors in JSX\n            </p>\n          </div>\n        </div>\n      );\n    }\n\n    return this.props.children;\n  }\n}\n\nReactDOM.createRoot(document.getElementById("root")).render(\n  <React.StrictMode>\n    <ErrorBoundary>\n      <App />\n    </ErrorBoundary>\n  </React.StrictMode>,\n);\n`,
         );
 
         await webContainerService.writeFile(
           "/src/index.jsx",
-          normalizeReactCode(cleanedCode),
+          normalizeReactCode(codeForPreview),
         );
 
         if (!dependenciesInstalledRef.current) {

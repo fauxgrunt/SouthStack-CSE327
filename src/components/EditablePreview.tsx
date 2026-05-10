@@ -75,7 +75,7 @@ export const EditablePreview: React.FC<EditablePreviewProps> = ({
         observer.observe(document.body, { childList: true, subtree: true });
       })();
     `;
-    
+
     iframeRef.current.contentDocument.body.appendChild(script);
   }, []);
 
@@ -133,7 +133,7 @@ export const EditablePreview: React.FC<EditablePreviewProps> = ({
             Edit Code
           </button>
         </div>
-        
+
         <div className="flex gap-2">
           {activeTab === "code" && (
             <button
@@ -150,7 +150,7 @@ export const EditablePreview: React.FC<EditablePreviewProps> = ({
               Save
             </button>
           )}
-          
+
           <button
             type="button"
             onClick={handleCopy}
@@ -184,7 +184,8 @@ export const EditablePreview: React.FC<EditablePreviewProps> = ({
                 className="h-full w-full rounded-2xl border border-white/10 bg-slate-900"
               />
               <div className="mt-2 text-xs text-slate-400 px-2">
-                💡 Drag any element to reposition it (changes are not persisted to code)
+                💡 Drag any element to reposition it (changes are not persisted
+                to code)
               </div>
             </div>
           ) : (
@@ -203,9 +204,7 @@ export const EditablePreview: React.FC<EditablePreviewProps> = ({
             <div className="mt-2 text-xs text-slate-400">
               {editableCode.length} characters
               {editableCode !== generatedCode && (
-                <span className="ml-2 text-amber-300">
-                  • Unsaved changes
-                </span>
+                <span className="ml-2 text-amber-300">• Unsaved changes</span>
               )}
             </div>
           </div>

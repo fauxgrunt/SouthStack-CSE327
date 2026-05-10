@@ -1,5 +1,5 @@
 import { useRef } from "react";
-import * as webllm from "@mlc-ai/web-llm";
+import { generateWithGroq } from "../services/groqClient";
 
 /**
  * Example: Custom Agent for Test Generation
@@ -15,13 +15,13 @@ interface TestGenerationResult {
 }
 
 export const useTestAgent = () => {
-  const engineRef = useRef<webllm.MLCEngine | null>(null);
+  const isReadyRef = useRef(false);
 
   /**
    * Initialize the test generation agent with the same engine
    */
-  const initialize = async (engine: webllm.MLCEngine) => {
-    engineRef.current = engine;
+  const initialize = async (_engine?: unknown) => {
+    isReadyRef.current = true;
   };
 
   /**
@@ -31,7 +31,7 @@ export const useTestAgent = () => {
     sourceCode: string,
     testingFramework: "jest" | "vitest" | "mocha" = "jest",
   ): Promise<TestGenerationResult> => {
-    if (!engineRef.current) {
+    if (!isReadyRef.current) {
       throw new Error("Test agent not initialized");
     }
 
@@ -54,16 +54,13 @@ ${sourceCode}
 Return ONLY the test code, no explanations.`;
 
     try {
-      const completion = await engineRef.current.chat.completions.create({
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
-        temperature: 0.5, // Lower temperature for more consistent test generation
-        max_tokens: 1024,
-      });
-
-      const testCode = extractCode(completion.choices[0].message.content || "");
+      const testCode = extractCode(
+        await generateWithGroq(userPrompt, systemPrompt, {
+          temperature: 0.5,
+          maxTokens: 1024,
+          timeoutMs: 30000,
+        }),
+      );
 
       // Extract covered scenarios from test descriptions
       const coverage = extractCoverageScenarios(testCode);
@@ -73,7 +70,7 @@ Return ONLY the test code, no explanations.`;
         coverage,
         success: true,
       };
-    } catch (error: any) {
+    } catch {
       return {
         testCode: "",
         coverage: [],
@@ -89,10 +86,10 @@ Return ONLY the test code, no explanations.`;
  * Example: Debug Agent for Error Analysis
  */
 export const useDebugAgent = () => {
-  const engineRef = useRef<webllm.MLCEngine | null>(null);
+  const isReadyRef = useRef(false);
 
-  const initialize = async (engine: webllm.MLCEngine) => {
-    engineRef.current = engine;
+  const initialize = async (_engine?: unknown) => {
+    isReadyRef.current = true;
   };
 
   /**
@@ -103,7 +100,7 @@ export const useDebugAgent = () => {
     error: string,
     stackTrace?: string,
   ) => {
-    if (!engineRef.current) {
+    if (!isReadyRef.current) {
       throw new Error("Debug agent not initialized");
     }
 
@@ -129,16 +126,13 @@ ${stackTrace ? `STACK TRACE:\n${stackTrace}` : ""}
 
 Provide analysis and fixed code.`;
 
-    const completion = await engineRef.current.chat.completions.create({
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-      temperature: 0.3,
-      max_tokens: 1500,
-    });
-
-    return parseDebugResponse(completion.choices[0].message.content || "");
+    return parseDebugResponse(
+      await generateWithGroq(userPrompt, systemPrompt, {
+        temperature: 0.3,
+        maxTokens: 1500,
+        timeoutMs: 30000,
+      }),
+    );
   };
 
   return { initialize, analyzeError };
@@ -148,10 +142,10 @@ Provide analysis and fixed code.`;
  * Example: Refactor Agent for Code Improvement
  */
 export const useRefactorAgent = () => {
-  const engineRef = useRef<webllm.MLCEngine | null>(null);
+  const isReadyRef = useRef(false);
 
-  const initialize = async (engine: webllm.MLCEngine) => {
-    engineRef.current = engine;
+  const initialize = async (_engine?: unknown) => {
+    isReadyRef.current = true;
   };
 
   /**
@@ -161,7 +155,7 @@ export const useRefactorAgent = () => {
     code: string,
     goals: string[] = ["readability", "performance", "maintainability"],
   ) => {
-    if (!engineRef.current) {
+    if (!isReadyRef.current) {
       throw new Error("Refactor agent not initialized");
     }
 
@@ -183,16 +177,13 @@ ${code}
 
 Provide refactored version with explanation of changes.`;
 
-    const completion = await engineRef.current.chat.completions.create({
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-      temperature: 0.6,
-      max_tokens: 1500,
-    });
-
-    return parseRefactorResponse(completion.choices[0].message.content || "");
+    return parseRefactorResponse(
+      await generateWithGroq(userPrompt, systemPrompt, {
+        temperature: 0.6,
+        maxTokens: 1500,
+        timeoutMs: 30000,
+      }),
+    );
   };
 
   return { initialize, suggestRefactoring };
@@ -208,10 +199,10 @@ export const useMultiAgentCoordinator = () => {
   const debugAgent = useDebugAgent();
   const refactorAgent = useRefactorAgent();
 
-  const initialize = async (engine: webllm.MLCEngine) => {
-    await testAgent.initialize(engine);
-    await debugAgent.initialize(engine);
-    await refactorAgent.initialize(engine);
+  const initialize = async (_engine?: unknown) => {
+    await testAgent.initialize();
+    await debugAgent.initialize();
+    await refactorAgent.initialize();
   };
 
   /**

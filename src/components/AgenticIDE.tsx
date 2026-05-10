@@ -3,6 +3,7 @@ import { Camera, Loader2, Play, Power, Trash2 } from "lucide-react";
 import { useAgenticLoop } from "../hooks/useAgenticLoop";
 import { useVoiceInput } from "../hooks/useVoiceInput";
 import { EditablePreview } from "./EditablePreview";
+import { hasGroqApiKey } from "../services/groqClient";
 
 export const AgenticIDE: React.FC = () => {
   const {
@@ -43,9 +44,10 @@ export const AgenticIDE: React.FC = () => {
     selectedLogIndex !== null ? (visibleLogs[selectedLogIndex] ?? null) : null;
 
   const canGenerate = useMemo(
-    () => Boolean(prompt.trim()) && !busy && isReady,
+    () => Boolean(prompt.trim()) && !busy && isReady && hasGroqApiKey(),
     [busy, prompt, isReady],
   );
+  const groqReady = hasGroqApiKey();
 
   const readFileAsDataUrl = useCallback((file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
@@ -225,16 +227,17 @@ export const AgenticIDE: React.FC = () => {
             </p>
             <h1 className="mt-4 text-4xl font-bold">Local UI Builder</h1>
             <p className="mt-3 text-slate-300 text-sm max-w-xl mx-auto">
-              Generate React components locally with WebGPU acceleration
+              Generate React components with Groq-backed atom generation.
             </p>
 
             {state.currentPhase === "idle" ? (
               <button
                 onClick={() => initializeEngine()}
-                className="mt-8 inline-flex items-center gap-2 rounded-2xl bg-cyan-400 px-6 py-4 text-base font-semibold text-slate-950 transition hover:bg-cyan-300"
+                disabled={!groqReady}
+                className="mt-8 inline-flex items-center gap-2 rounded-2xl bg-cyan-400 px-6 py-4 text-base font-semibold text-slate-950 transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:bg-slate-500 disabled:text-slate-200"
               >
                 <Power className="h-5 w-5" />
-                Initialize Runtime
+                {groqReady ? "Initialize Runtime" : "Set Up Groq Key"}
               </button>
             ) : (
               <div className="mt-8 w-full space-y-6">
@@ -253,12 +256,12 @@ export const AgenticIDE: React.FC = () => {
                   <div className="space-y-2 text-left">
                     <div className="flex items-center gap-3">
                       <div
-                        className={`h-2 w-2 rounded-full ${state.logs.some((l) => l.stage === "init" && l.message.includes("Downloading")) ? "bg-emerald-400" : "bg-slate-600"}`}
+                        className={`h-2 w-2 rounded-full ${state.logs.some((l) => l.stage === "init" && l.message.includes("Groq API key detected")) ? "bg-emerald-400" : "bg-slate-600"}`}
                       ></div>
                       <span
-                        className={`text-xs ${state.logs.some((l) => l.stage === "init" && l.message.includes("Downloading")) ? "text-slate-300" : "text-slate-500"}`}
+                        className={`text-xs ${state.logs.some((l) => l.stage === "init" && l.message.includes("Groq API key detected")) ? "text-slate-300" : "text-slate-500"}`}
                       >
-                        Downloading WebLLM model (~3.2GB)
+                        Verifying Groq configuration
                       </span>
                     </div>
                     <div className="flex items-center gap-3">
@@ -294,9 +297,18 @@ export const AgenticIDE: React.FC = () => {
               </div>
             )}
 
+            {!groqReady && (
+              <div className="mt-4 rounded-xl border border-amber-500/30 bg-amber-950/40 px-4 py-3 text-sm text-amber-200">
+                Groq is not configured yet. Create a{" "}
+                <span className="font-semibold">.env.local</span> file with{" "}
+                <span className="font-semibold">VITE_GROQ_API_KEY</span> and
+                restart the dev server.
+              </div>
+            )}
+
             <p className="mt-8 text-xs text-slate-500">
-              First-time initialization downloads ~3.2GB model to IndexedDB
-              (cached for offline use)
+              First-time initialization checks your Groq key and boots the
+              preview runtime.
             </p>
           </div>
         </div>
@@ -323,7 +335,9 @@ export const AgenticIDE: React.FC = () => {
             </div>
             <div className="rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-xs text-slate-300">
               <div className="text-emerald-400 font-semibold">✓ Ready</div>
-              <div className="mt-1 text-slate-500">WebLLM initialized</div>
+              <div className="mt-1 text-slate-500">
+                Groq-first runtime ready
+              </div>
             </div>
           </div>
         </header>

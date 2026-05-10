@@ -7,6 +7,7 @@
     "dev": "concurrently \"peerjs --port 9000 --path /peerjs\" \"vite --host 0.0.0.0\"",
     "dev:swarm": "concurrently \"peerjs --port 9000 --path /peerjs\" \"vite --host 0.0.0.0\"",
     "build": "tsc && vite build",
+    "smoke": "node scripts/smoke-check.mjs",
     "preview": "vite preview",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 50"
   },
@@ -19,6 +20,7 @@
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.3.0",
     "framer-motion": "^12.34.3",
+    "groq-sdk": "^1.1.2",
     "lucide-react": "^1.9.0",
     "monaco-editor": "^0.55.1",
     "peerjs": "^1.5.5",

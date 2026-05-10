@@ -5,8 +5,6 @@
  * used throughout the application.
  */
 
-import type * as webllm from "@mlc-ai/web-llm";
-
 // ============================================================================
 // CORE TYPES
 // ============================================================================
@@ -66,7 +64,7 @@ export interface ExecutionMetadata {
 }
 
 // ============================================================================
-// WEBLLM INTEGRATION
+// GENERATION INTEGRATION
 // ============================================================================
 
 export interface ModelConfig {
@@ -422,7 +420,7 @@ export interface UseAgenticLoopReturn {
   }>;
   cancelExecution: () => void;
   isReady: boolean;
-  engine: webllm.MLCEngine | null;
+  engine: unknown | null;
 }
 
 export interface UseTestAgentReturn {

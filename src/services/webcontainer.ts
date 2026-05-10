@@ -15,6 +15,7 @@ class WebContainerService {
   private static instance: WebContainerService | null = null;
   private container: WebContainer | null = null;
   private bootPromise: Promise<WebContainer> | null = null;
+  private serverUrlByPort = new Map<number, string>();
 
   private constructor() {
     // Private constructor for singleton pattern
@@ -73,7 +74,54 @@ class WebContainerService {
       }
 
       logger.info("Booting WebContainer...", { component: "WebContainer" });
-      const container = await WebContainer.boot();
+      console.log(
+        "[WebContainer] Starting boot sequence at",
+        new Date().toISOString(),
+      );
+
+      let container: WebContainer;
+      try {
+        // WebContainer.boot can only be called once per origin; wrap to provide clearer diagnostics
+        // Add a 60-second timeout to prevent hanging
+        console.log(
+          "[WebContainer] Calling WebContainer.boot() - this may take 30-60 seconds",
+        );
+        const bootPromise = WebContainer.boot();
+
+        const bootPromiseWithTimeout = Promise.race([
+          bootPromise,
+          new Promise<WebContainer>((_, reject) =>
+            setTimeout(() => {
+              console.error(
+                "[WebContainer] TIMEOUT: Boot did not complete within 60 seconds",
+              );
+              reject(new Error("WebContainer boot timeout after 60 seconds"));
+            }, 60000),
+          ),
+        ]);
+
+        console.log("[WebContainer] Awaiting boot completion...");
+        container = await bootPromiseWithTimeout;
+        console.log(
+          "[WebContainer] Boot completed successfully at",
+          new Date().toISOString(),
+        );
+      } catch (bootErr: any) {
+        const msg = String(bootErr?.message || bootErr);
+        console.error("[WebContainer] Boot error:", msg);
+        logger.error("WebContainer.boot threw an error", {
+          component: "WebContainer",
+          message: msg,
+        });
+        // Surface the original message to callers so they can handle single-instance cases.
+        throw new Error(msg);
+      }
+      container.on("server-ready", (port: number, url: string) => {
+        this.serverUrlByPort.set(port, url);
+        logger.info(`WebContainer server ready on ${port}: ${url}`, {
+          component: "WebContainer",
+        });
+      });
       logger.info("WebContainer successfully booted!", {
         component: "WebContainer",
       });
@@ -253,13 +301,36 @@ class WebContainerService {
    * WebContainer automatically maps ports to unique URLs
    */
   public async getServerUrl(port: number = 3000): Promise<string> {
+    const known = this.serverUrlByPort.get(port);
+    if (known) return known;
+    return this.waitForServerUrl(port, 30000);
+  }
+
+  /**
+   * Wait for the mapped URL that WebContainer emits through `server-ready`.
+   */
+  public async waitForServerUrl(
+    port: number,
+    timeoutMs: number = 30000,
+  ): Promise<string> {
     this.getContainer();
 
-    // Wait for server to be ready (simple polling)
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const existing = this.serverUrlByPort.get(port);
+    if (existing) return existing;
 
-    // WebContainer provides a unique URL for each port
-    return `http://localhost:${port}`;
+    const startedAt = Date.now();
+    const intervalMs = 200;
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const url = this.serverUrlByPort.get(port);
+      if (url) return url;
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+
+    throw new Error(
+      `Timed out waiting for WebContainer server URL on port ${port}.`,
+    );
   }
 }
 

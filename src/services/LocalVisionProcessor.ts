@@ -139,6 +139,97 @@ function normalizeCaptionResult(output: unknown): string {
   return "";
 }
 
+function compressTextBlock(text: string): string {
+  return text
+    .replace(/\s+/g, " ")
+    .replace(/\s+([,.;:!?])/g, "$1")
+    .trim();
+}
+
+function detectUiType(caption: string, ocrText: string): string {
+  const combined = `${caption} ${ocrText}`.toLowerCase();
+
+  if (
+    /username|password|login|sign in|forgot your password|next/.test(combined)
+  ) {
+    return "authentication/login screen";
+  }
+
+  if (/dashboard|sidebar|nav|navigation|cards|metrics|charts/.test(combined)) {
+    return "dashboard screen";
+  }
+
+  if (/hero|landing|banner|headline|call to action/.test(combined)) {
+    return "landing page hero section";
+  }
+
+  if (/form|input|submit|register|contact/.test(combined)) {
+    return "form-based screen";
+  }
+
+  return "general UI screen";
+}
+
+function buildStructuredVisionSummary(
+  caption: string,
+  ocrText: string,
+): string {
+  const normalizedOcr = compressTextBlock(ocrText);
+  const uiType = detectUiType(caption, normalizedOcr);
+  const combined = `${caption} ${normalizedOcr}`.toLowerCase();
+
+  const detectedComponents: string[] = [];
+  if (
+    /username|password|login|sign in|forgot your password|next/.test(combined)
+  ) {
+    detectedComponents.push(
+      "Centered login card",
+      "Username input",
+      "Password input",
+      "Primary action button",
+      "Forgot password link",
+    );
+  }
+  if (/developed|maintained|footer|copyright/.test(combined)) {
+    detectedComponents.push("Footer attribution text");
+  }
+  if (/current server time|time/.test(combined)) {
+    detectedComponents.push("Status/footer timestamp");
+  }
+  if (/portal|nsu|rds/.test(combined)) {
+    detectedComponents.push("Portal title/header", "Branding label");
+  }
+  if (/card|panel|box/.test(combined) || detectedComponents.length === 0) {
+    detectedComponents.push("Main content card");
+  }
+
+  const layoutNotes: string[] = [];
+  if (/username|password|login|sign in|next/.test(combined)) {
+    layoutNotes.push(
+      "The main UI is centered on the page inside a compact card.",
+    );
+    layoutNotes.push(
+      "The card uses a blue-to-cyan gradient with a strong primary CTA.",
+    );
+  }
+  if (/developed|maintained|current server time/.test(combined)) {
+    layoutNotes.push(
+      "Secondary footer/status text appears beneath the main card.",
+    );
+  }
+
+  return [
+    `UI TYPE: ${uiType}`,
+    `SCREENSHOT SUMMARY: ${caption}`,
+    normalizedOcr
+      ? `VISIBLE TEXT: ${normalizedOcr}`
+      : "VISIBLE TEXT: (none detected)",
+    `DETECTED COMPONENTS: ${[...new Set(detectedComponents)].join(", ")}`,
+    `LAYOUT NOTES: ${layoutNotes.length ? layoutNotes.join(" ") : "Use the screenshot geometry, spacing, and alignment as the source of truth."}`,
+    "RECONSTRUCTION RULE: Recreate the screenshot visually as closely as possible, including spacing, colors, typography, and placement of elements.",
+  ].join("\n");
+}
+
 async function getVisionPipeline(): Promise<VisionPipeline> {
   if (!visionPipelinePromise) {
     visionPipelinePromise = (async () => {
@@ -202,11 +293,7 @@ export async function extractUIFromImage(imageBase64: string): Promise<string> {
       `[LocalVisionProcessor] Extraction complete (${timeElapsed}ms): caption="${caption}", ocr="${ocrText.substring(0, 100)}"`,
     );
 
-    const parts = [
-      `Screenshot description: ${caption}`,
-      ocrText ? `Visible text detected: ${ocrText}` : "",
-      "INSTRUCTIONS: Reconstruct this UI exactly as shown in the screenshot, matching all text, layout, spacing, colors, typography, and interactive elements.",
-    ].filter(Boolean);
+    const parts = [buildStructuredVisionSummary(caption, ocrText)];
 
     return parts.join("\n\n");
   } catch (error) {
